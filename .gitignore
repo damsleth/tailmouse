@@ -1,1 +1,10 @@
 .DS_Store
+build/
+.build/
+Tailmouse.xcodeproj/
+Config/Local.xcconfig
+AGENTS.local.md
+*.ipa
+.plans/
+iOS/Info.plist
+Mac/Info.plist

@@ -1,0 +1,31 @@
+import Network
+
+/// How a phone's packets reach the Mac. The Mac can switch each one off.
+public enum Route: String, CaseIterable, Codable, Identifiable, Sendable {
+  case lan, awdl, tailnet
+
+  public var id: Self { self }
+
+  /// Classifies a flow by the phone's address: tailnet ranges first, then the
+  /// link-local AWDL interface; anything else came over the local network.
+  public static func of(_ endpoint: NWEndpoint) -> Route {
+    guard case .hostPort(let host, _) = endpoint else { return .lan }
+    switch host {
+    case .ipv4(let a):
+      return isTailnet(a) ? .tailnet : .lan
+    case .ipv6(let a):
+      if let v4 = a.asIPv4 { return isTailnet(v4) ? .tailnet : .lan }
+      if a.rawValue.starts(with: [0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0]) { return .tailnet }  // fd7a:115c:a1e0::/48
+      let iface = a.interface?.name ?? "\(host)".split(separator: "%").last.map(String.init) ?? ""
+      return iface.hasPrefix("awdl") ? .awdl : .lan
+    default:
+      return .lan
+    }
+  }
+
+  /// 100.64.0.0/10
+  private static func isTailnet(_ a: IPv4Address) -> Bool {
+    let b = a.rawValue
+    return b[0] == 100 && b[1] & 0xC0 == 64
+  }
+}

@@ -1,0 +1,63 @@
+name: Tailmouse
+options:
+  bundleIdPrefix: dev.tailmouse
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+packages:
+  TailmouseKit:
+    path: Packages/TailmouseKit
+targets:
+  TailmouseMac:
+    type: application
+    platform: macOS
+    sources: [Mac]
+    dependencies:
+      - package: TailmouseKit
+    info:
+      path: Mac/Info.plist
+      properties:
+        TailmouseRepo: $(REPO_SLUG)
+    settings:
+      base:
+        PRODUCT_NAME: Tailmouse
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).mac
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Tailmouse
+        ASSETCATALOG_COMPILER_APPICON_NAME: macOSAppIcon
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_VERSION: "5.0"
+  Tailmouse:
+    type: application
+    platform: iOS
+    sources: [iOS]
+    dependencies:
+      - package: TailmouseKit
+    info:
+      path: iOS/Info.plist
+      properties:
+        CFBundleDisplayName: Tailmouse
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        CADisableMinimumFrameDurationOnPhone: true
+        NSLocalNetworkUsageDescription: Tailmouse finds and talks to your Mac on the local network.
+        NSBonjourServices: [_tailmouse._udp]
+        CFBundleURLTypes:
+          - CFBundleURLName: tailmouse
+            CFBundleURLSchemes: [tailmouse]
+    settings:
+      base:
+        PRODUCT_NAME: Tailmouse
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).ios
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: iOSAppIcon
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"

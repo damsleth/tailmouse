@@ -1,0 +1,301 @@
+import Foundation
+import Network
+import TailmouseKit
+import UIKit
+
+/// The phone's connection to its paired Mac.
+///
+/// Opens one UDP flow per path: each tailnet address from the pairing, and the
+/// Mac's Bonjour service on every interface it shows up on (Wi-Fi = LAN,
+/// awdl0 = AWDL). Every path is probed once a second; hot traffic goes to the
+/// fastest live one (`PathPicker`). All on the main queue: touches arrive
+/// there, and a send is a few microseconds.
+@MainActor
+final class Client: ObservableObject {
+  @Published private(set) var pairing: Pairing?
+  @Published private(set) var macName: String?
+  @Published private(set) var path: String?
+  @Published private(set) var rtt: Double?
+  @Published private(set) var paths: [String] = []
+  /// The Mac wants a PIN before it starts a session.
+  @Published private(set) var needsPin = false
+  @Published private(set) var pinWasWrong = false
+
+  var interpreter = TouchInterpreter()
+  /// Shown in the Mac's device list. Set from Settings.
+  var deviceName = UIDevice.current.name
+
+  /// New per launch, so the Mac starts a fresh session (see `Packet.client`).
+  private let clientID = UInt64.random(in: 1...UInt64.max)
+  /// Stable per install, so the Mac lists this phone once across launches.
+  private let deviceID: UUID = {
+    if let s = UserDefaults.standard.string(forKey: "deviceID"), let id = UUID(uuidString: s) { return id }
+    let id = UUID()
+    UserDefaults.standard.set(id.uuidString, forKey: "deviceID")
+    return id
+  }()
+  private var seal: Seal?
+  private var session: UInt64 = 0
+  private var outbox = Outbox()
+  private var motion: Motion?
+  private var picker = PathPicker()
+  /// When any path last answered; see `probe`.
+  private var lastReply = 0.0
+  private var flows: [String: NWConnection] = [:]
+  private var browser: NWBrowser?
+  /// Interfaces that already have a Bonjour flow; `open` numbers duplicate labels.
+  private var pinned: Set<String> = []
+  private let monitor = NWPathMonitor()
+  private var probeTimer: Timer?
+  private var resendTimer: Timer?
+  private let tapHaptic = UIImpactFeedbackGenerator(style: .light)
+  private let dragHaptic = UIImpactFeedbackGenerator(style: .medium)
+
+  init() {
+    if let p = PairingStore.load() { use(p) }
+    monitor.pathUpdateHandler = { [weak self] _ in
+      Task { @MainActor in self?.reconnect() }
+    }
+    monitor.start(queue: .main)
+    probeTimer = Timer.scheduledTimer(withTimeInterval: Wire.keepalive, repeats: true) { [weak self] _ in
+      Task { @MainActor in self?.probe() }
+    }
+    // Retransmit unacked events quickly; idle when there are none.
+    resendTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
+      Task { @MainActor in
+        guard let self, !self.outbox.pending.isEmpty else { return }
+        self.send(to: self.hotFlows())
+      }
+    }
+  }
+
+  var status: String {
+    guard pairing != nil else { return "not paired" }
+    if needsPin { return "PIN needed" }
+    guard let path else { return "searching…" }
+    let ms = rtt.map { String(format: "%.0f ms", $0 * 1000) } ?? ""
+    // "LAN 2" is a second LAN flow; the number only matters in Settings.
+    return "\(path.split(separator: " ")[0]) · \(ms)"
+  }
+
+  // MARK: Pairing
+
+  func pair(with url: URL) -> Bool {
+    guard let p = Pairing(url: url) else { return false }
+    PairingStore.save(p)
+    use(p)
+    return true
+  }
+
+  func enter(pin: String) {
+    pairing?.pin = pin
+    PairingStore.save(pairing)
+    pinWasWrong = false
+    send(to: Array(flows.values))
+  }
+
+  func forget() {
+    PairingStore.save(nil)
+    pairing = nil
+    seal = nil
+    teardown()
+  }
+
+  private func use(_ p: Pairing) {
+    pairing = p
+    seal = Seal(keyData: p.key)
+    macName = p.name
+    reconnect()
+  }
+
+  // MARK: Input from the UI
+
+  func touches(fingers: Int, x: Double, y: Double, time: Double) {
+    handle(interpreter.update(fingers: fingers, x: x, y: y, time: time))
+  }
+
+  func tick(time: Double) {
+    handle(interpreter.tick(time: time))
+  }
+
+  func send(_ event: Event) {
+    outbox.push(event, time: now())
+    send(to: hotFlows())
+  }
+
+  private func handle(_ outputs: [TouchInterpreter.Output]) {
+    guard !outputs.isEmpty else { return }
+    var dirty = false
+    for o in outputs {
+      switch o {
+      case .motion(let m): motion = m; dirty = true
+      case .event(let e):
+        outbox.push(e, time: now())
+        dirty = true
+        if e == .dragBegin { dragHaptic.impactOccurred() }
+      case .haptic: tapHaptic.impactOccurred()
+      }
+    }
+    if dirty { send(to: hotFlows()) }
+  }
+
+  // MARK: Paths
+
+  /// Rebuild every flow. Called on pairing, network change and foregrounding.
+  func reconnect() {
+    teardown()
+    lastReply = now()
+    guard let p = pairing else { return }
+    for host in p.hosts {
+      open("Tailnet", NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: p.port)!, using: .udp))
+    }
+    let params = NWParameters.udp
+    params.includePeerToPeer = true
+    let b = NWBrowser(for: .bonjour(type: Wire.bonjourType, domain: nil), using: params)
+    b.browseResultsChangedHandler = { [weak self] results, _ in
+      Task { @MainActor in self?.found(results) }
+    }
+    b.start(queue: .main)
+    browser = b
+  }
+
+  private func found(_ results: Set<NWBrowser.Result>) {
+    guard let p = pairing else { return }
+    for r in results {
+      guard case .service(let name, _, _, _) = r.endpoint, name == p.name else { continue }
+      // One flow per interface, pinned to it. An unpinned UDP flow would settle
+      // on Wi-Fi even where client isolation drops every packet.
+      for iface in r.interfaces {
+        let label = iface.name.hasPrefix("awdl") ? "AWDL"
+          : [.wifi, .wiredEthernet, .loopback].contains(iface.type) ? "LAN" : iface.name
+        guard pinned.insert(iface.name).inserted else { continue }
+        let params = NWParameters.udp
+        params.includePeerToPeer = true
+        params.requiredInterface = iface
+        open(label, NWConnection(to: r.endpoint, using: params))
+      }
+    }
+  }
+
+  private func open(_ label: String, _ c: NWConnection) {
+    var label = label
+    var n = 2
+    while flows[label] != nil { label = "\(label.split(separator: " ")[0]) \(n)"; n += 1 }
+    flows[label] = c
+    paths = flows.keys.sorted()
+    c.stateUpdateHandler = { [weak self] state in
+      if case .failed = state {
+        Task { @MainActor in
+          self?.flows[label] = nil
+          self?.picker.remove(path: label)
+          self?.paths = self?.flows.keys.sorted() ?? []
+        }
+      }
+    }
+    c.start(queue: .main)
+    receive(label, c)
+    send(to: [c])
+  }
+
+  private func receive(_ label: String, _ c: NWConnection) {
+    c.receiveMessage { [weak self] data, _, _, error in
+      Task { @MainActor in
+        guard let self else { return }
+        if let data { self.received(data, via: label) }
+        if error == nil, self.flows[label] === c { self.receive(label, c) }
+      }
+    }
+  }
+
+  private func received(_ data: Data, via label: String) {
+    guard let reply = seal?.open(Reply.self, from: data) else { return }
+    let t = now()
+    lastReply = t
+    picker.replied(path: label, rtt: t - reply.echo, now: t)
+    if reply.session != session {
+      session = reply.session
+      outbox.restart()
+    }
+    outbox.ack(reply.ack)
+    needsPin = reply.pin != nil
+    if reply.pin == .wrong, pairing?.pin != nil {
+      // Stop sending it: the Mac counts each distinct wrong PIN.
+      pinWasWrong = true
+      pairing?.pin = nil
+      PairingStore.save(pairing)
+    }
+    macName = reply.name
+    path = picker.active
+    rtt = path.flatMap(picker.rtt(of:))
+  }
+
+  private func probe() {
+    // Nothing has answered for a while (the Mac restarted or changed port):
+    // start over, so Bonjour resolves the service again.
+    if pairing != nil, now() - lastReply > 5 { reconnect() }
+    picker.choose(now: now())
+    path = picker.active
+    rtt = path.flatMap(picker.rtt(of:))
+    send(to: Array(flows.values))
+  }
+
+  private func hotFlows() -> [NWConnection] {
+    if let a = picker.active, let c = flows[a] { return [c] }
+    return Array(flows.values)
+  }
+
+  private func send(to targets: [NWConnection]) {
+    guard let seal, !targets.isEmpty else { return }
+    // Before the Mac issues a session nothing would run, so send nothing but the hello.
+    let live = session != 0
+    let p = Packet(client: clientID, session: session, time: now(),
+                   motion: live ? motion : nil, events: live ? outbox.pending : [],
+                   device: deviceID, name: deviceName,
+                   via: picker.active.map { String($0.split(separator: " ")[0]) }, pin: pairing?.pin)
+    guard let data = try? seal.seal(p) else { return }
+    for c in targets { c.send(content: data, completion: .idempotent) }
+  }
+
+  private func teardown() {
+    browser?.cancel()
+    browser = nil
+    flows.values.forEach { $0.cancel() }
+    flows.removeAll()
+    pinned.removeAll()
+    picker = PathPicker()
+    paths = []
+    path = nil
+    rtt = nil
+  }
+
+  private func now() -> Double { ProcessInfo.processInfo.systemUptime }
+}
+
+/// The pairing lives in a file inside the app's container.
+///
+/// ponytail: not the Keychain. A sideloaded (SideStore re-signed) app may lack
+/// a keychain access group, and the container is already sandboxed and
+/// encrypted at rest. Move to the Keychain if the app ever ships signed.
+enum PairingStore {
+  private static var url: URL {
+    URL.applicationSupportDirectory.appending(path: "pairing.json")
+  }
+
+  static func load() -> Pairing? {
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return try? JSONDecoder().decode(Pairing.self, from: data)
+  }
+
+  static func save(_ p: Pairing?) {
+    guard let p, let data = try? JSONEncoder().encode(p) else {
+      try? FileManager.default.removeItem(at: url)
+      return
+    }
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    var u = url
+    try? data.write(to: u, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try? u.setResourceValues(values)
+  }
+}

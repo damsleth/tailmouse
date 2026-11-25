@@ -1,0 +1,8 @@
+// Shared build settings. Machine-specific values (team ID, bundle prefix)
+// go in the gitignored Local.xcconfig; see Local.xcconfig.example.
+BUNDLE_ID_PREFIX = dev.tailmouse
+CODE_SIGN_STYLE = Automatic
+
+// GitHub owner/repo for the About tab link; empty hides it.
+REPO_SLUG =
+#include? "Local.xcconfig"
