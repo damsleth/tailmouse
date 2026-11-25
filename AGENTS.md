@@ -22,8 +22,12 @@ Each of these has a test in `TailmouseKitTests`. Keep the tests green when you c
 - A packet runs only under a session id that the Mac issued. First contact and stale sessions get a reply and nothing more, so replayed traffic never runs.
 - Motion in a packet is applied before its events, so a click lands where the cursor is. Motion from a packet older than the newest one seen is dropped, so a slow path (DERP) can never drag the cursor back.
 - An event more than `Wire.eventMaxAge` old when it reaches the Mac is consumed without running, so a click or keystroke never fires late. Releases (`dragEnd`, `scrollEnd`) always run.
+- Freshness is also judged by the Mac's clock: each session tracks the smallest `now - Packet.time`, and a packet more than `eventMaxAge` behind that runs nothing and doesn't keep the session alive. Phone timestamps alone can't catch a packet an on-path attacker held back and released later.
+- Motion totals must be finite and below 1e7, or the Mac's integer conversions could trap.
 - When a session expires, the Mac releases held input such as an active drag.
-- With a PIN set, a session starts only for a packet carrying it. Five distinct wrong PINs lock the PIN check and the Mac makes a new key. Distinct, because a phone repeats one stale PIN on every path and probe.
+- With a PIN set, a session starts only for a packet carrying it. Five distinct wrong PINs lock the PIN check and the Mac makes a new key. Distinct, because a phone repeats one stale PIN on every path and probe. A right PIN does not reset the count; a new key or PIN does. "Require PIN" with fewer than four digits entered lets no one in (`pin == ""`).
+- The phone ignores a reply whose `echo` is older than the newest it has acted on (per path for RTT, overall for session and acks), so a replayed reply can't roll its session back.
+- A `tailmouse://` link only fills `Client.pendingPairing`; nothing changes until the user confirms. Link hosts are limited to tailnet addresses and `*.ts.net` (`Route.isTailnet(host:)`), at most 8.
 - Fields added to `Packet` and `Reply` are optional, so a phone on an older build still connects.
 - New `Event` cases go at the end. v2 reserves dock, spaces, media and clipboard.
 
@@ -32,6 +36,9 @@ Each of these has a test in `TailmouseKitTests`. Keep the tests green when you c
 - macOS Accessibility (TCC) permission is tied to the code signature. An ad-hoc signed build loses the permission on every rebuild. Sign with the team in `Config/Local.xcconfig`; see the `.example` file.
 - `security find-identity -v -p codesigning` lists 0 valid identities while an Apple Development cert is present: the Apple WWDR G3 intermediate is missing from the login keychain.
 - Paths: the phone opens one flow per tailnet host and one per Bonjour interface, each pinned with `requiredInterface`. An unpinned UDP flow to a Bonjour service settles on Wi-Fi and stays there, even when client isolation drops every packet. AWDL comes from `includePeerToPeer` on both the listener and the browser.
+- The Mac caps flows at 32. A flow whose first datagram fails to open is cancelled, and flows that never authenticated go after 3 s.
+- `make install-mac` installs a Release build: a Debug build carries `get-task-allow`, so any same-user process could attach to an app that holds Accessibility.
+- The iOS app refuses third-party keyboards (`AppDelegate`), since everything typed goes to the Mac.
 - Route switches are enforced on the Mac: `Route.of` classifies each flow by the phone's address and a switched-off route gets no reply, so the phone's picker drops it. The Devices list shows the path the phone reports in `Packet.via` instead, because probes reach the Mac on every route.
 - The iOS IPA ships unsigned (`make ipa`), and SideStore re-signs it on the phone.
 - Raw UIKit touches with coalesced touches drive the trackpad. The screen has to stay at 120 Hz while a finger is down, because iOS delivers touches in step with the display.

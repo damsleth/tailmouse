@@ -20,9 +20,11 @@ name=$(scutil --get ComputerName)
 hosts=$(ifconfig | awk '/inet 100\./ {print $2}')
 macbid=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' build/Build/Products/Debug/Tailmouse.app/Contents/Info.plist)
 port=$(defaults read "$macbid" port 2>/dev/null || echo 47474)
-python3 -I - "$key" "$name" "$port" "$data/Library/Application Support/pairing.json" $hosts <<'EOF'
-import base64, ipaddress, json, sys
-h, name, port, out, *hosts = sys.argv[1:]
+TM_KEY=$key python3 -I - "$name" "$port" "$data/Library/Application Support/pairing.json" $hosts <<'EOF'
+import base64, ipaddress, json, os, sys
+# The key comes in the environment, not argv, so `ps` doesn't show it.
+h = os.environ["TM_KEY"]
+name, port, out, *hosts = sys.argv[1:]
 hosts = [a for a in hosts if ipaddress.ip_address(a) in ipaddress.ip_network("100.64.0.0/10")]
 key = bytes.fromhex(h) if len(h) == 64 else h.encode()
 json.dump({"key": base64.b64encode(key).decode(), "name": name, "port": int(port), "hosts": hosts}, open(out, "w"))

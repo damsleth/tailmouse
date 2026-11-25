@@ -222,3 +222,59 @@ struct SplitMix: RandomNumberGenerator {
   #expect(route("192.168.1.20") == .lan)
   #expect(route("127.0.0.1") == .lan)
 }
+
+// MARK: - Security review
+
+@Test func heldBackPacketRunsNothingAndKeepsNoSessionAlive() {
+  var mac = Sessions(name: "mac")
+  let id = mac.receive(Packet(client: 1, session: 0, time: 100), now: 0).0.session
+  let held = Packet(client: 1, session: id, time: 100.5, events: [Sequenced(seq: 1, time: 100.5, event: .key(.enter, []))])
+  // Same phone timestamps, released 5 s later by the Mac's clock.
+  let late = mac.receive(held, now: 5.5)
+  #expect(late.1.isEmpty)
+  let expired = mac.expire(now: 5.6)   // the late packet did not refresh it
+  #expect(expired)
+  #expect(mac.activeClients == 0)
+}
+
+@Test func freshPacketsStillRunAfterAPathSwitch() {
+  var mac = Sessions(name: "mac")
+  let id = mac.receive(Packet(client: 1, session: 0, time: 100), now: 0.003).0.session
+  // A slower path (300 ms) is late by the Mac's clock but within eventMaxAge.
+  let p = Packet(client: 1, session: id, time: 101, events: [Sequenced(seq: 1, time: 101, event: .click(.left))])
+  let actions = mac.receive(p, now: 1.3).1
+  #expect(actions == [.event(.click(.left))])
+}
+
+@Test func pinRequiredButUnsetLetsNoOneIn() {
+  var mac = Sessions(name: "mac")
+  mac.pin = ""
+  let a = mac.receive(Packet(client: 1, session: 0, time: 0), now: 0).0.session
+  let b = mac.receive(Packet(client: 1, session: 0, time: 0, pin: ""), now: 0).0.session
+  #expect(a == 0 && b == 0)
+}
+
+@Test func rightPinDoesNotResetGuessCount() {
+  var mac = Sessions(name: "mac")
+  mac.pin = "1234"
+  for round in 0..<5 {
+    _ = mac.receive(Packet(client: UInt64(100 + round), session: 0, time: 0, pin: "1234"), now: 0)
+    _ = mac.receive(Packet(client: 1, session: 0, time: 0, pin: String(format: "%04d", round)), now: 0)
+  }
+  #expect(mac.pinLocked)
+}
+
+@Test func absurdMotionIsDropped() {
+  var mac = Sessions(name: "mac")
+  let id = mac.receive(Packet(client: 1, session: 0, time: 0), now: 0).0.session
+  for x in [1e20, .infinity, .nan] {
+    let p = Packet(client: 1, session: id, time: 0, motion: Motion(kind: .scroll, gesture: 1, x: x, y: 0))
+    let actions = mac.receive(p, now: 0).1
+    #expect(actions.isEmpty)
+  }
+}
+
+@Test func pairingLinkKeepsOnlyTailnetHosts() {
+  let p = Pairing(key: Seal.newKey().data, name: "Example Mac", hosts: ["100.64.0.1", "evil.example", "8.8.8.8", "fd7a:115c:a1e0::1", "x.tail0000.ts.net"])
+  #expect(Pairing(url: p.url)?.hosts == ["100.64.0.1", "fd7a:115c:a1e0::1", "x.tail0000.ts.net"])
+}

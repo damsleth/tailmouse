@@ -10,11 +10,17 @@ enum KeyStore {
      kSecAttrAccount as String: account]
   }
 
-  static func load(_ account: String = "pairing-key") -> Data? {
+  enum LoadError: Error { case keychain(OSStatus) }
+
+  /// nil when there is no such item; throws when the Keychain refused, so a
+  /// locked or denied Keychain never silently becomes a new pairing key.
+  static func load(_ account: String = "pairing-key") throws -> Data? {
     var q = query(account)
     q[kSecReturnData as String] = true
     var out: CFTypeRef?
-    guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess else { return nil }
+    let status = SecItemCopyMatching(q as CFDictionary, &out)
+    if status == errSecItemNotFound { return nil }
+    guard status == errSecSuccess else { throw LoadError.keychain(status) }
     return out as? Data
   }
 

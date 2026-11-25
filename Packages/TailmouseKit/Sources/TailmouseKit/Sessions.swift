@@ -18,18 +18,25 @@ public struct Sessions: Sendable {
     /// Newest `Packet.time` seen. Motion from an older packet is dropped: a
     /// slow path (tailnet via DERP) would otherwise drag the cursor back.
     var newest = -Double.infinity
+    /// Smallest `now - Packet.time` seen: transit time plus the clock offset.
+    /// A packet whose delay exceeds it by more than `Wire.eventMaxAge` was held
+    /// back (or replayed) and is ignored, judged by the Mac's own clock.
+    var minDelay: Double
   }
 
   private var table: [UInt64: Session] = [:]
   public let name: String
 
-  /// The PIN a phone must send to start a session; nil means none. Changing it
-  /// ends every session, so each phone has to present the new one.
+  /// The PIN a phone must send to start a session; nil means none, and an
+  /// empty string means required but not set yet, which lets no one in.
+  /// Changing it ends every session, so each phone has to present the new one.
   public var pin: String? {
     didSet { if pin != oldValue { table = [:]; wrongPins = [] } }
   }
-  /// Distinct wrong PINs since the last right one. Counting distinct values
-  /// bounds guessing; a phone repeating one stale PIN on every path counts once.
+  /// Distinct wrong PINs since the key or PIN last changed. Counting distinct
+  /// values bounds guessing; a phone repeating one stale PIN on every path
+  /// counts once. A right PIN does not clear it, so a key holder gets four
+  /// guesses in total, not four per reconnect of the real phone.
   private var wrongPins: Set<String> = []
   public static let maxWrongPins = 5
   /// Too many guesses: refuse every PIN until the caller makes a new key.
@@ -48,25 +55,32 @@ public struct Sessions: Sendable {
     guard var s = table[p.client] else {
       // First contact, or the Mac restarted. Nothing in this packet runs:
       // it was not sealed under a session we issued, so it may be a replay.
-      if let pin, pinLocked || p.pin != pin {
-        if let tried = p.pin, !pinLocked { wrongPins.insert(tried) }
+      if let pin, pinLocked || pin.isEmpty || p.pin != pin {
+        if let tried = p.pin, !pinLocked, !pin.isEmpty { wrongPins.insert(tried) }
         return (Reply(session: 0, ack: 0, echo: p.time, name: name, pin: p.pin == nil ? .required : .wrong), [])
       }
-      wrongPins = []
-      let s = Session(id: newID(), lastSeen: now)
+      let s = Session(id: newID(), lastSeen: now, minDelay: now - p.time)
+      table[p.client] = s
+      return (reply(s, p), [])
+    }
+    guard p.session == s.id else { return (reply(s, p), []) }
+    let delay = now - p.time
+    s.minDelay = min(s.minDelay, delay)
+    guard delay - s.minDelay <= Wire.eventMaxAge else {
+      // Late by the Mac's clock: nothing runs and the session is not kept
+      // alive, so held-back traffic can't fire later. Its events are resent
+      // in fresh packets, where the age filter below drops all but releases.
       table[p.client] = s
       return (reply(s, p), [])
     }
     s.lastSeen = now
-    guard p.session == s.id else {
-      table[p.client] = s
-      return (reply(s, p), [])
-    }
     var actions: [Action] = []
     let fresh = p.time >= s.newest
     s.newest = max(s.newest, p.time)
     // Motion first, so a click lands where the latest total put the cursor.
-    if let m = p.motion, fresh {
+    // A real gesture total stays far below this; the bound keeps the Mac's
+    // integer conversions safe from a malformed packet.
+    if let m = p.motion, fresh, m.x.isFinite, m.y.isFinite, abs(m.x) < 1e7, abs(m.y) < 1e7 {
       switch m.kind {
       case .pointer:
         if let d = s.pointer.resolve(m) { actions.append(.move(dx: d.dx, dy: d.dy)) }

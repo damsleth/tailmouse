@@ -41,6 +41,11 @@ final class Client: ObservableObject {
   private var picker = PathPicker()
   /// When any path last answered; see `probe`.
   private var lastReply = 0.0
+  /// Newest `Reply.echo` that changed state, overall and per path. An older
+  /// reply is a straggler or a replay: it must not roll back the session or
+  /// acks, or keep a dead path looking alive.
+  private var newestEcho = -Double.infinity
+  private var newestEchoOnPath: [String: Double] = [:]
   private var flows: [String: NWConnection] = [:]
   private var browser: NWBrowser?
   /// Interfaces that already have a Bonjour flow; `open` numbers duplicate labels.
@@ -80,11 +85,22 @@ final class Client: ObservableObject {
 
   // MARK: Pairing
 
+  /// A link waiting for the user to confirm (`confirmPairing`).
+  @Published var pendingPairing: Pairing?
+
+  /// Any app or web page can open a tailmouse:// link, so nothing changes
+  /// until the user confirms the Mac it names.
   func pair(with url: URL) -> Bool {
     guard let p = Pairing(url: url) else { return false }
+    pendingPairing = p
+    return true
+  }
+
+  func confirmPairing() {
+    guard let p = pendingPairing else { return }
+    pendingPairing = nil
     PairingStore.save(p)
     use(p)
-    return true
   }
 
   func enter(pin: String) {
@@ -104,6 +120,13 @@ final class Client: ObservableObject {
   private func use(_ p: Pairing) {
     pairing = p
     seal = Seal(keyData: p.key)
+    // Nothing meant for the previous Mac goes to this one.
+    session = 0
+    outbox = Outbox()
+    motion = nil
+    newestEcho = -.infinity
+    needsPin = false
+    pinWasWrong = false
     macName = p.name
     reconnect()
   }
@@ -208,10 +231,16 @@ final class Client: ObservableObject {
   }
 
   private func received(_ data: Data, via label: String) {
-    guard let reply = seal?.open(Reply.self, from: data) else { return }
+    guard let reply = seal?.open(Reply.self, from: data),
+          reply.echo >= newestEchoOnPath[label] ?? -.infinity, reply.echo <= now() else { return }
+    newestEchoOnPath[label] = reply.echo
     let t = now()
     lastReply = t
     picker.replied(path: label, rtt: t - reply.echo, now: t)
+    path = picker.active
+    rtt = path.flatMap(picker.rtt(of:))
+    guard reply.echo >= newestEcho else { return }
+    newestEcho = reply.echo
     if reply.session != session {
       session = reply.session
       outbox.restart()
@@ -225,8 +254,6 @@ final class Client: ObservableObject {
       PairingStore.save(pairing)
     }
     macName = reply.name
-    path = picker.active
-    rtt = path.flatMap(picker.rtt(of:))
   }
 
   private func probe() {

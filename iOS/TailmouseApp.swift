@@ -1,8 +1,18 @@
 import SwiftUI
 import TailmouseKit
 
+/// Keystrokes typed for the Mac (passwords included) stay away from
+/// third-party keyboards, which can log or upload what they see.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+  func application(_ application: UIApplication,
+                   shouldAllowExtensionPointIdentifier id: UIApplication.ExtensionPointIdentifier) -> Bool {
+    id != .keyboard
+  }
+}
+
 @main
 struct TailmouseApp: App {
+  @UIApplicationDelegateAdaptor private var delegate: AppDelegate
   @StateObject private var client = Client()
   @Environment(\.scenePhase) private var phase
   @AppStorage("sensitivity") private var sensitivity = 1.5
@@ -23,6 +33,14 @@ struct TailmouseApp: App {
       }
       .preferredColorScheme(.dark)
       .onOpenURL { _ = client.pair(with: $0) }
+      .alert("Pair with “\(client.pendingPairing?.name ?? "")”?",
+             isPresented: Binding(get: { client.pendingPairing != nil }, set: { if !$0 { client.pendingPairing = nil } })) {
+        Button("Pair") { client.confirmPairing() }
+        Button("Cancel", role: .cancel) { client.pendingPairing = nil }
+      } message: {
+        Text(client.pairing.map { "This replaces \($0.name). " } ?? "")
+          + Text("Your touches and typing will go to this Mac. Only pair with a code shown on your own Mac.")
+      }
       .onAppear(perform: applySettings)
       .onChange(of: sensitivity) { applySettings() }
       .onChange(of: naturalScroll) { applySettings() }

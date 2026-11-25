@@ -8,3 +8,5 @@ AGENTS.local.md
 .plans/
 iOS/Info.plist
 Mac/Info.plist
+.swiftpm/
+xcuserdata/

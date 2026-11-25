@@ -38,7 +38,11 @@ final class Server {
   private var devices: [String: DeviceRecord]
   private let input = Input()
   private var listener: NWListener?
-  private var connections: [ObjectIdentifier: (conn: NWConnection, route: Route, lastSeen: TimeInterval)] = [:]
+  /// Every source address and port gets a flow before anything is known about
+  /// it, so the table is capped and flows that never authenticate go quickly.
+  private var connections: [ObjectIdentifier: (conn: NWConnection, route: Route, lastSeen: TimeInterval, authed: Bool)] = [:]
+  private static let maxConnections = 32
+  private static let maxDevices = 50
   private var timer: DispatchSourceTimer?
 
   init(key: Data, name: String, devices: [DeviceRecord], config: ServerConfig) {
@@ -126,7 +130,8 @@ final class Server {
   }
 
   private func accept(_ c: NWConnection) {
-    connections[ObjectIdentifier(c)] = (c, Route.of(c.endpoint), now())
+    guard connections.count < Self.maxConnections else { c.cancel(); return }
+    connections[ObjectIdentifier(c)] = (c, Route.of(c.endpoint), now(), false)
     c.stateUpdateHandler = { [weak self, weak c] state in
       guard let self, let c else { return }
       switch state {
@@ -148,26 +153,35 @@ final class Server {
 
   private func handle(_ data: Data, from c: NWConnection) {
     // A switched-off route gets no answer, so the phone's picker never uses it.
-    guard let route = connections[ObjectIdentifier(c)]?.route, config.routes.contains(route),
-          // Unauthenticated or tampered: drop without a word.
-          let packet = seal.open(Packet.self, from: data) else { return }
-    connections[ObjectIdentifier(c)]?.lastSeen = now()
+    let id = ObjectIdentifier(c)
+    guard let entry = connections[id], config.routes.contains(entry.route) else { return }
+    // Unauthenticated or tampered: drop without a word, and drop the flow too
+    // unless it has carried a good packet before.
+    guard let packet = seal.open(Packet.self, from: data) else {
+      if !entry.authed { c.cancel(); connections[id] = nil }
+      return
+    }
+    connections[id]?.lastSeen = now()
+    connections[id]?.authed = true
     let (reply, actions) = sessions.receive(packet, now: now())
     actions.forEach(input.perform)
     if let out = try? seal.seal(reply) {
       c.send(content: out, completion: .idempotent)
     }
-    if reply.pin == nil {
-      let id = packet.device?.uuidString ?? "client-\(packet.client)"
-      devices[id] = DeviceRecord(id: id, name: packet.name ?? "iPhone",
-                                 via: packet.via ?? devices[id]?.via ?? "", lastSeen: Date())
+    if packet.session != 0, packet.session == reply.session {
+      let key = packet.device?.uuidString ?? "client-\(packet.client)"
+      devices[key] = DeviceRecord(id: key, name: String((packet.name ?? "iPhone").prefix(64)),
+                                  via: String((packet.via ?? devices[key]?.via ?? "").prefix(16)), lastSeen: Date())
+      if devices.count > Self.maxDevices, let oldest = devices.values.min(by: { $0.lastSeen < $1.lastSeen }) {
+        devices[oldest.id] = nil
+      }
     }
   }
 
   private func housekeeping() {
     let t = now()
     if sessions.expire(now: t) { input.releaseAll() }
-    for (id, entry) in connections where t - entry.lastSeen > 30 {
+    for (id, entry) in connections where t - entry.lastSeen > (entry.authed ? 30 : 3) {
       entry.conn.cancel()
       connections[id] = nil
     }

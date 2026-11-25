@@ -39,8 +39,8 @@ public struct Pairing: Codable, Equatable, Sendable {
           let name = items.first(where: { $0.name == "n" })?.value, !name.isEmpty
     else { return nil }
     let port = items.first(where: { $0.name == "p" })?.value.flatMap(UInt16.init) ?? Wire.defaultPort
-    let hosts = items.filter { $0.name == "h" }.compactMap(\.value)
-    self.init(key: key, name: name, port: port, hosts: hosts)
+    let hosts = items.filter { $0.name == "h" }.compactMap(\.value).filter(Route.isTailnet(host:)).prefix(8)
+    self.init(key: key, name: String(name.prefix(64)), port: port, hosts: Array(hosts))
   }
 
   static func base64url(_ d: Data) -> String {

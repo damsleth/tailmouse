@@ -72,7 +72,13 @@ final class KeyCatcherView: UIView, UIKeyInput {
     } else if !mods.isEmpty, text.count == 1, let c = text.first {
       client.send(.char(c, mods))
     } else {
-      client.send(.text(text))
+      // A paste can be any length; keep each event small so a packet carrying
+      // the whole unacked window stays under the UDP datagram limit.
+      var rest = Substring(text)
+      while !rest.isEmpty {
+        client.send(.text(String(rest.prefix(100))))
+        rest = rest.dropFirst(100)
+      }
     }
     modifiers?.mods = []
   }

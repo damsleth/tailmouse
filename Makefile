@@ -23,10 +23,14 @@ run-mac: mac
 	open $(DERIVED)/Build/Products/Debug/Tailmouse.app
 
 # Launch at Login registers the app where it runs, so run it from /Applications.
-install-mac: mac
+# A Release build: Debug carries get-task-allow, which lets any process of the
+# same user attach to an app that holds Accessibility.
+install-mac: gen
+	xcodebuild -project Tailmouse.xcodeproj -scheme TailmouseMac -configuration Release \
+	  -derivedDataPath $(DERIVED) -destination 'platform=macOS' build -quiet
 	@$(STOP_MAC)
 	rm -rf /Applications/Tailmouse.app
-	cp -R $(DERIVED)/Build/Products/Debug/Tailmouse.app /Applications/
+	cp -R $(DERIVED)/Build/Products/Release/Tailmouse.app /Applications/
 	open /Applications/Tailmouse.app
 
 ios-sim: gen

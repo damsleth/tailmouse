@@ -27,6 +27,7 @@ struct TailmouseMacApp: App {
 final class AppModel: ObservableObject {
   @Published var devices: [DeviceRecord]
   @Published var state = "Starting…"
+  @Published var keychainError: String?
   @Published var trusted = AXIsProcessTrusted()
   @Published var pairing: Pairing
 
@@ -65,28 +66,39 @@ final class AppModel: ObservableObject {
   private let server: Server
   private var axTimer: Timer?
 
-  /// The PIN only counts once all four digits are in.
   var config: ServerConfig {
-    ServerConfig(port: UInt16(port), routes: routes, pin: requirePin && pin.count == 4 ? pin : nil)
+    ServerConfig(port: UInt16(port), routes: routes, pin: Self.effectivePin(requirePin, pin))
+  }
+
+  /// Required but not all four digits in yet: "" lets no one in (fail closed).
+  static func effectivePin(_ required: Bool, _ pin: String) -> String? {
+    required ? (pin.count == 4 ? pin : "") : nil
   }
 
   init() {
     let name = Host.current().localizedName ?? "Mac"
-    let key = KeyStore.load() ?? {
-      let k = Seal.newKey().data
-      KeyStore.save(k)
-      return k
-    }()
+    let key: Data
+    do {
+      key = try KeyStore.load() ?? {
+        let k = Seal.newKey().data
+        KeyStore.save(k)
+        return k
+      }()
+    } catch {
+      // Don't overwrite a key we couldn't read; run unpaired until relaunch.
+      key = Seal.newKey().data
+      keychainError = "Couldn't read the pairing key from the Keychain (\(error)). Relaunch to try again."
+    }
     let d = UserDefaults.standard
-    let port = d.object(forKey: "port") as? Int ?? Int(Wire.defaultPort)
+    let port = (d.object(forKey: "port") as? Int).flatMap { (1024...65535).contains($0) ? $0 : nil } ?? Int(Wire.defaultPort)
     let routes = Set((d.stringArray(forKey: "routes") ?? Route.allCases.map(\.rawValue)).compactMap(Route.init))
     let requirePin = d.bool(forKey: "requirePin")
-    let pin = KeyStore.load("pin").flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    let pin = (try? KeyStore.load("pin")).flatMap { $0.flatMap { String(data: $0, encoding: .utf8) } } ?? ""
     let devices = d.data(forKey: "devices").flatMap { try? JSONDecoder().decode([DeviceRecord].self, from: $0) } ?? []
     (self.port, self.routes, self.requirePin, self.pin, self.devices) = (port, routes, requirePin, pin, devices)
     pairing = Pairing(key: key, name: name, port: UInt16(port), hosts: tailnetAddresses())
     server = Server(key: key, name: name, devices: devices, config: ServerConfig(
-      port: UInt16(port), routes: routes, pin: requirePin && pin.count == 4 ? pin : nil))
+      port: UInt16(port), routes: routes, pin: Self.effectivePin(requirePin, pin)))
     server.onDevices = { [weak self] list in
       guard let self else { return }
       // Assign every tick even when equal: "connected" is relative to now.
@@ -156,6 +168,7 @@ struct MenuContent: View {
       ForEach(model.connected) { Text("\($0.name) · \($0.via)") }
     }
     Text(model.state)
+    if let e = model.keychainError { Text(e) }
     if !model.trusted {
       Button("Grant Accessibility…") { model.promptAccessibility() }
     }
@@ -276,6 +289,10 @@ struct SettingsTab: View {
               .accessibilityLabel("PIN")
               .frame(width: 80)
           }
+          if model.requirePin && model.pin.count < 4 {
+            Text("Enter 4 digits. Until then no iPhone can connect.")
+              .font(.caption).foregroundStyle(.orange)
+          }
           note("Asked for on the iPhone, in addition to the pairing code. 5 different wrong PINs make a new key, and every iPhone has to scan again.")
         }
       }
@@ -368,15 +385,26 @@ struct PairView: View {
            : "Tailnet: \(model.pairing.hosts.joined(separator: ", "))")
         .font(.caption).foregroundStyle(.secondary)
       HStack {
-        Button("Copy Link") {
-          NSPasteboard.general.clearContents()
-          NSPasteboard.general.setString(model.pairing.url.absoluteString, forType: .string)
-        }
+        Button("Copy Link") { copySecret(model.pairing.url.absoluteString) }
         Button("New Key", role: .destructive) { model.resetPairing() }
           .help("Unpairs every iPhone. They have to scan again.")
       }
     }
     .padding(24)
     .frame(width: 340)
+  }
+}
+
+/// Copies the pairing link marked as concealed, so clipboard managers skip it,
+/// and clears it after a minute if nothing else was copied since.
+func copySecret(_ s: String) {
+  let pb = NSPasteboard.general
+  pb.clearContents()
+  pb.declareTypes([.string, NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")], owner: nil)
+  pb.setString(s, forType: .string)
+  pb.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+  let count = pb.changeCount
+  DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+    if pb.changeCount == count { pb.clearContents() }
   }
 }

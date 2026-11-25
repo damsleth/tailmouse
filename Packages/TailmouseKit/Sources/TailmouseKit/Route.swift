@@ -23,6 +23,14 @@ public enum Route: String, CaseIterable, Codable, Identifiable, Sendable {
     }
   }
 
+  /// Whether a pairing URL host is a tailnet address or MagicDNS name. Other
+  /// hosts are dropped, so a crafted link can't point the phone at the internet.
+  public static func isTailnet(host: String) -> Bool {
+    if let a = IPv4Address(host) { return isTailnet(a) }
+    if let a = IPv6Address(host) { return a.rawValue.starts(with: [0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0]) }
+    return host.lowercased().hasSuffix(".ts.net")
+  }
+
   /// 100.64.0.0/10
   private static func isTailnet(_ a: IPv4Address) -> Bool {
     let b = a.rawValue
