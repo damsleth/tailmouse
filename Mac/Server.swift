@@ -7,6 +7,8 @@ struct ServerConfig: Equatable {
   var port: UInt16 = Wire.defaultPort
   var routes: Set<Route> = Set(Route.allCases)
   var pin: String?
+  /// Scroll momentum time constant in seconds; 0 is off.
+  var momentum = 0.5
 }
 
 /// A phone the Mac has seen, kept across launches for the Devices list.
@@ -36,7 +38,7 @@ final class Server {
   private var sessions: Sessions
   private var config: ServerConfig
   private var devices: [String: DeviceRecord]
-  private let input = Input()
+  private let input: Input
   private var listener: NWListener?
   /// Every source address and port gets a flow before anything is known about
   /// it, so the table is capped and flows that never authenticate go quickly.
@@ -51,6 +53,8 @@ final class Server {
     self.sessions = Sessions(name: name)
     self.sessions.pin = config.pin
     self.config = config
+    self.input = Input(queue: queue)
+    self.input.momentum.tau = config.momentum
     self.devices = Dictionary(devices.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
   }
 
@@ -78,6 +82,7 @@ final class Server {
       let old = self.config
       self.config = new
       self.sessions.pin = new.pin
+      self.input.momentum.tau = new.momentum
       // includePeerToPeer and the port are fixed per listener.
       if old.port != new.port || old.routes.contains(.awdl) != new.routes.contains(.awdl) {
         self.restart()

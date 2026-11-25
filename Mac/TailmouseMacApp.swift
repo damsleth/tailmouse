@@ -46,6 +46,12 @@ final class AppModel: ObservableObject {
       server.apply(config)
     }
   }
+  @Published var momentum: Double {
+    didSet {
+      defaults.set(momentum, forKey: "momentum")
+      server.apply(config)
+    }
+  }
   @Published var requirePin: Bool {
     didSet {
       defaults.set(requirePin, forKey: "requirePin")
@@ -67,7 +73,7 @@ final class AppModel: ObservableObject {
   private var axTimer: Timer?
 
   var config: ServerConfig {
-    ServerConfig(port: UInt16(port), routes: routes, pin: Self.effectivePin(requirePin, pin))
+    ServerConfig(port: UInt16(port), routes: routes, pin: Self.effectivePin(requirePin, pin), momentum: momentum)
   }
 
   /// Required but not all four digits in yet: "" lets no one in (fail closed).
@@ -93,12 +99,14 @@ final class AppModel: ObservableObject {
     let port = (d.object(forKey: "port") as? Int).flatMap { (1024...65535).contains($0) ? $0 : nil } ?? Int(Wire.defaultPort)
     let routes = Set((d.stringArray(forKey: "routes") ?? Route.allCases.map(\.rawValue)).compactMap(Route.init))
     let requirePin = d.bool(forKey: "requirePin")
+    let momentum = d.object(forKey: "momentum") as? Double ?? 0.5
     let pin = (try? KeyStore.load("pin")).flatMap { $0.flatMap { String(data: $0, encoding: .utf8) } } ?? ""
     let devices = d.data(forKey: "devices").flatMap { try? JSONDecoder().decode([DeviceRecord].self, from: $0) } ?? []
     (self.port, self.routes, self.requirePin, self.pin, self.devices) = (port, routes, requirePin, pin, devices)
+    self.momentum = momentum
     pairing = Pairing(key: key, name: name, port: UInt16(port), hosts: tailnetAddresses())
     server = Server(key: key, name: name, devices: devices, config: ServerConfig(
-      port: UInt16(port), routes: routes, pin: Self.effectivePin(requirePin, pin)))
+      port: UInt16(port), routes: routes, pin: Self.effectivePin(requirePin, pin), momentum: momentum))
     server.onDevices = { [weak self] list in
       guard let self else { return }
       // Assign every tick even when equal: "connected" is relative to now.
@@ -255,6 +263,21 @@ struct SettingsTab: View {
           }
         }
       }
+      LabeledContent("Scrolling:") {
+        VStack(alignment: .leading, spacing: 4) {
+          Picker("Momentum", selection: $model.momentum) {
+            Text("Off").tag(0.0)
+            Text("Light").tag(0.3)
+            Text("Normal").tag(0.5)
+            Text("Heavy").tag(0.8)
+          }
+          .pickerStyle(.segmented)
+          .labelsHidden()
+          .frame(width: 280)
+          note("How far a two-finger scroll keeps gliding after you lift your fingers, like a Mac trackpad.")
+        }
+      }
+      .padding(.top, 12)
       LabeledContent("Listening port:") {
         VStack(alignment: .leading, spacing: 4) {
           TextField("Port", value: $model.port, format: .number.grouping(.never))

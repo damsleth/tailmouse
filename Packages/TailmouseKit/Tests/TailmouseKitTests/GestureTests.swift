@@ -89,3 +89,31 @@ private func lastMotion(_ out: [TouchInterpreter.Output]) -> Motion? {
   #expect(p.choose(now: 2.7) == "lan")                     // awdl went quiet, lan still alive
   #expect(p.choose(now: 10) == nil)
 }
+
+// MARK: - Momentum
+
+@Test func flickGlidesAndSlowsDown() {
+  var m = Momentum(tau: 0.5)
+  for i in 0..<12 { m.record(t: Double(i) / 120, dx: 0, dy: -20) }   // 2400 px/s up
+  let glides = m.release(t: 11.0 / 120 + 0.01)
+  #expect(glides)
+  var total = 0.0, steps = 0
+  while let d = m.step(dt: 1.0 / 120) { total += d.dy; steps += 1 }
+  // Distance of an exponential glide is v0 * tau, minus the tail below stopSpeed.
+  #expect(total < -1100 && total > -1200)
+  #expect(steps > 100 && steps < 600)
+}
+
+@Test func fingersThatStopBeforeLiftingDontGlide() {
+  var m = Momentum(tau: 0.5)
+  for i in 0..<12 { m.record(t: Double(i) / 120, dx: 0, dy: -20) }
+  let glides = m.release(t: 0.3)   // held still for 200 ms
+  #expect(!glides)
+}
+
+@Test func momentumOffNeverGlides() {
+  var m = Momentum(tau: 0)
+  for i in 0..<12 { m.record(t: Double(i) / 120, dx: 0, dy: -20) }
+  let glides = m.release(t: 0.1)
+  #expect(!glides)
+}

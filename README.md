@@ -13,7 +13,8 @@ Status: early. v1 covers the trackpad and keyboard.
 - The Mac runs a menu bar app that listens on one UDP port (47474 by default) and advertises itself with Bonjour.
 - The iPhone opens a flow on every route it can find: the local network, AWDL and each tailnet address of the Mac. It probes all of them once a second and sends on the fastest one that answers.
 - Pointer movement travels as running totals, so a lost packet costs nothing. Clicks and keys are numbered and resent until the Mac acknowledges them, and run once, in order.
-- The Mac app has a window (menu bar › Open Tailmouse…) with the device list, the port, which routes to allow, an optional PIN, and Launch at Login.
+- Two-finger scrolls keep gliding after you lift your fingers, like a Mac trackpad. The Mac does the glide, so it costs no extra traffic.
+- The Mac app has a window (menu bar › Open Tailmouse…) with the device list, scroll momentum, the port, which routes to allow, an optional PIN, and Launch at Login.
 
 ## Security
 

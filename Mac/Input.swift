@@ -12,6 +12,12 @@ import TailmouseKit
 /// a key tap.
 final class Input {
   private let source = CGEventSource(stateID: .hidSystemState)
+  private let queue: DispatchQueue
+
+  /// The glide after a two-finger scroll; its `tau` is set from the settings window.
+  var momentum = Momentum(tau: 0.5)
+
+  init(queue: DispatchQueue) { self.queue = queue }
 
   // MARK: Pointer
 
@@ -30,6 +36,8 @@ final class Input {
   private var boundsAt: TimeInterval = -.infinity
 
   func perform(_ action: Sessions.Action) {
+    // A finger back on the glass stops the coast, as on a trackpad.
+    stopCoasting()
     switch action {
     case .move(let dx, let dy): move(dx: dx, dy: dy)
     case .scroll(let dx, let dy, _): scroll(dx: dx, dy: dy, phase: 2)
@@ -38,6 +46,7 @@ final class Input {
   }
 
   func releaseAll() {
+    stopCoasting()
     if dragging {
       postButton(.left, down: false, state: 1)
       dragging = false
@@ -141,16 +150,56 @@ final class Input {
   /// Phase: 1 began, 2 changed, 4 ended (kCGScrollPhase*).
   private func scroll(dx: Double, dy: Double, phase: Int64) {
     if phase == 1 { scrolling = true; scrollCarry = (0, 0) }
+    if phase == 2 { momentum.record(t: now(), dx: dx, dy: dy) }
     if phase == 4 { scrolling = false }
+    post(dx: dx, dy: dy, phase: phase, momentumPhase: 0)
+    if phase == 4 { coast() }
+  }
+
+  private func post(dx: Double, dy: Double, phase: Int64, momentumPhase: Int64) {
     let x = dx + scrollCarry.x, y = dy + scrollCarry.y
-    let ix = Int32(x.rounded(.towardZero)), iy = Int32(y.rounded(.towardZero))
+    // Clamped: a scroll event carries Int32, and Int32(huge) traps.
+    let ix = Int32(max(-10_000, min(10_000, x.rounded(.towardZero))))
+    let iy = Int32(max(-10_000, min(10_000, y.rounded(.towardZero))))
     scrollCarry = (x - Double(ix), y - Double(iy))
-    if phase == 2 && ix == 0 && iy == 0 { return }
+    if (phase == 2 || momentumPhase == 2) && ix == 0 && iy == 0 { return }
     guard let e = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2,
                           wheel1: iy, wheel2: ix, wheel3: 0) else { return }
     e.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
     e.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+    e.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentumPhase)
     e.post(tap: .cghidEventTap)
+  }
+
+  // MARK: Momentum
+
+  private var coastTimer: DispatchSourceTimer?
+  private var coastLast: TimeInterval = 0
+
+  private func coast() {
+    let t = now()
+    guard momentum.release(t: t) else { return }
+    coastLast = t
+    post(dx: 0, dy: 0, phase: 0, momentumPhase: 1)
+    let timer = DispatchSource.makeTimerSource(queue: queue)
+    timer.schedule(deadline: .now(), repeating: 1.0 / 120)
+    timer.setEventHandler { [weak self] in self?.coastStep() }
+    timer.resume()
+    coastTimer = timer
+  }
+
+  private func coastStep() {
+    let t = now()
+    defer { coastLast = t }
+    guard let d = momentum.step(dt: t - coastLast) else { stopCoasting(); return }
+    post(dx: d.dx, dy: d.dy, phase: 0, momentumPhase: 2)
+  }
+
+  private func stopCoasting() {
+    guard let timer = coastTimer else { return }
+    timer.cancel()
+    coastTimer = nil
+    post(dx: 0, dy: 0, phase: 0, momentumPhase: 3)
   }
 
   // MARK: Keyboard

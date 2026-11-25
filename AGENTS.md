@@ -4,7 +4,7 @@ Tailmouse turns an iPhone into a trackpad and keyboard for a Mac. Both ends are 
 
 ## Layout and commands
 
-- `Packages/TailmouseKit`: the protocol, with no sockets and no UI. Wire types, sealing, reliable ordering, motion totals, pairing URL, and the Mac's session logic. Any logic that can be pure lives here, so `make test` covers it.
+- `Packages/TailmouseKit`: the protocol, with no sockets and no UI. Wire types, sealing, reliable ordering, motion totals, pairing URL, the Mac's session logic, and scroll momentum (`Momentum`: the Mac measures the release speed from arrival times and glides on a 120 Hz timer, so the phone sends nothing extra). Any logic that can be pure lives here, so `make test` covers it.
 - `Mac/`: menu bar server. Network.framework listener plus CGEvent input. The main window is the SwiftUI `Settings` scene (Devices, Settings, About tabs); settings live in `UserDefaults`, the pairing key and PIN in the Keychain.
 - `iOS/`: the phone app.
 - `project.yml`: the XcodeGen spec. `Tailmouse.xcodeproj` and `iOS/Info.plist` are generated and gitignored. Change targets, Info.plist keys and settings in `project.yml`, then run `make gen`.
