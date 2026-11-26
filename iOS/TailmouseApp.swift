@@ -120,7 +120,7 @@ struct SettingsScreen: View {
         Section {
           Toggle("Use AWDL", isOn: $awdl)
         } footer: {
-          Text("Peer-to-peer Wi-Fi reaches the Mac where the network blocks devices from each other. Turn off if the pointer stutters on a normal Wi-Fi.")
+          Text("Peer-to-peer Wi-Fi reaches the Mac where the network blocks devices from each other. Used only when nothing else answers, because it makes every wireless route stutter.")
         }
         Section {
           TextField(UIDevice.current.name, text: $deviceName)

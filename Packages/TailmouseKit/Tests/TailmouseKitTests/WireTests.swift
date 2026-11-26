@@ -221,13 +221,14 @@ struct SplitMix: RandomNumberGenerator {
   #expect(route("fd7a:115c:a1e0::1") == .tailnet)
   #expect(route("192.168.1.20") == .lan)
   #expect(route("127.0.0.1") == .lan)
-  // Link-local: the interface decides, and only the Mac knows which one is the cable.
-  func linkLocal(_ iface: String) -> Route {
-    Route.of(.hostPort(host: NWEndpoint.Host("fe80::1%\(iface)"), port: 1)) { $0 == "en18" }
+  // Link-local: the interface decides, and only the Mac knows which one is the
+  // cable. The scope survives parsing only for an interface that exists here,
+  // so the test uses lo0.
+  func linkLocal(usb: String) -> Route {
+    Route.of(.hostPort(host: NWEndpoint.Host("fe80::1%lo0"), port: 1)) { $0 == usb }
   }
-  #expect(linkLocal("en18") == .usb)
-  #expect(linkLocal("en0") == .lan)
-  #expect(linkLocal("awdl0") == .awdl)
+  #expect(linkLocal(usb: "lo0") == .usb)
+  #expect(linkLocal(usb: "en99") == .lan)
 }
 
 // MARK: - Security review

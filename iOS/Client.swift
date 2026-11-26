@@ -24,9 +24,12 @@ final class Client: ObservableObject {
   var interpreter = TouchInterpreter()
   /// Shown in the Mac's device list. Set from Settings.
   var deviceName = UIDevice.current.name
-  /// Off: no AWDL browse or flow. An active AWDL makes the Wi-Fi radio hop
-  /// channels, which can add lag spikes to the LAN path too.
+  /// Whether AWDL may be used at all. Even then it is a last resort (`awdlUp`).
   var useAWDL = UserDefaults.standard.object(forKey: "awdl") as? Bool ?? true
+  /// AWDL is browsed and connected only after nothing else answered. Merely
+  /// browsing with it makes the phone's radio leave the Wi-Fi channel about
+  /// twice a second for ~100 ms, which stalls every other wireless path.
+  private var awdlUp = false
 
   /// New per launch, so the Mac starts a fresh session (see `Packet.client`).
   private let clientID = UInt64.random(in: 1...UInt64.max)
@@ -67,7 +70,7 @@ final class Client: ObservableObject {
     monitor.pathUpdateHandler = { [weak self] _ in
       Task { @MainActor in
         guard let self, self.now() - self.lastReply > 1.5 else { return }
-        self.reconnect()
+        self.reconnect(awdl: self.awdlUp)
       }
     }
     monitor.start(queue: .main)
@@ -174,14 +177,17 @@ final class Client: ObservableObject {
   // MARK: Paths
 
   /// Rebuild every flow. Called on pairing, network change and foregrounding.
-  func reconnect() {
+  /// Without AWDL unless asked: a fresh start (launch, foreground, new
+  /// pairing) tries the quiet paths first.
+  func reconnect(awdl: Bool = false) {
     teardown()
+    awdlUp = awdl && useAWDL
     lastReply = now()
     guard let p = pairing else { return }
     for host in p.hosts {
       open("Tailnet", NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: p.port)!, using: udp(p2p: false)))
     }
-    let params = udp(p2p: useAWDL)
+    let params = udp(p2p: awdlUp)
     let b = NWBrowser(for: .bonjour(type: Wire.bonjourType, domain: nil), using: params)
     b.browseResultsChangedHandler = { [weak self] results, _ in
       Task { @MainActor in self?.found(results) }
@@ -202,8 +208,8 @@ final class Client: ObservableObject {
         // own classification (`isPhoneUSB`) is what its route switches use.
         let label = iface.name.hasPrefix("awdl") ? "AWDL"
           : [.wifi, .loopback].contains(iface.type) ? "LAN" : PathPicker.wired
-        guard useAWDL || label != "AWDL", pinned.insert(iface.name).inserted else { continue }
-        let params = udp(p2p: useAWDL)
+        guard awdlUp || label != "AWDL", pinned.insert(iface.name).inserted else { continue }
+        let params = udp(p2p: awdlUp)
         params.requiredInterface = iface
         open(label, NWConnection(to: r.endpoint, using: params), iface: iface.name)
       }
@@ -287,7 +293,9 @@ final class Client: ObservableObject {
   private func probe() {
     // Nothing has answered for a while (the Mac restarted or changed port):
     // start over, so Bonjour resolves the service again.
-    if pairing != nil, now() - lastReply > 5 { reconnect() }
+    // The first rebuild comes sooner and brings AWDL in, if it is allowed.
+    let fallback = useAWDL && !awdlUp
+    if pairing != nil, now() - lastReply > (fallback ? 2 : 5) { reconnect(awdl: true) }
     picker.choose(now: now())
     path = picker.active
     rtt = path.flatMap(picker.rtt(of:))
