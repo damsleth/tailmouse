@@ -29,6 +29,7 @@ The round trip does not show short pauses. A route with a low round trip can sti
 
 - On the Mac, open **Settings › Routes**. Each route has a switch. The Mac does not answer on a route that is off.
 - On the iPhone, **Settings › Use AWDL** permits or prevents the AWDL route.
+- When the Mac is on a 6 GHz Wi-Fi network, the Mac sets the AWDL route to off and you cannot change the switch. Your selection comes back when the Mac joins a 2.4 GHz or 5 GHz network. Refer to [The pointer stutters about once a second](#the-pointer-stutters-about-once-a-second).
 - On the iPhone, **Settings › Paths** shows the routes that are open. The **Bluetooth** line shows the state of the Bluetooth route.
 
 To use the Bluetooth route, set the Local network, AWDL and Tailnet switches on the Mac to off.
@@ -87,10 +88,23 @@ The measurements below come from one 6 GHz network (channel 69, 160 MHz).
 
 Each device adds its own pauses. The pointer is smooth only when AWDL is quiet on the Mac and on the iPhone.
 
+The table below shows what makes the radio of the Mac leave the channel. Each value is the number of slow answers (more than 30 ms) in 500 pings to the router, sent at 50 each second, on the same network.
+
+| Condition on the Mac | Slow answers |
+|---|---|
+| AirDrop set to Everyone | 58 to 64 |
+| AirDrop set to Contacts Only or No One, AWDL route off | 0 |
+| AirDrop set to Contacts Only, AWDL route on | 117 to 120 |
+
+The AWDL interface (`awdl0`) stayed active in all three conditions. An active interface does not cause the pauses. A service that uses the interface does.
+
 ### What starts AWDL
 
 - On the iPhone, an app that searches for a service with peer-to-peer Wi-Fi starts AWDL. Tailmouse did this at all times in early versions. It now does this only as a last resort.
-- On the Mac, macOS starts AWDL for its own services. The AWDL switch in Tailmouse does not stop them.
+- On the Mac, AirDrop starts AWDL when it is set to **Everyone**. With **Contacts Only** or **No One**, the radio stays on the channel.
+- On the Mac, the AirDrop window in the Finder starts AWDL while it is open, with any AirDrop setting. Close the window. This was seen as a pointer that stutters. It was not measured with pings.
+- On the Mac, the AWDL route of Tailmouse starts AWDL. Thus the Mac sets this route to off on a 6 GHz network.
+- Sidecar and Universal Control use AWDL while they are in use. This was not measured.
 
 ### How to find the cause
 
@@ -112,7 +126,7 @@ Each device adds its own pauses. The pointer is smooth only when AWDL is quiet o
 6. Send the same pings to the address of the iPhone, with Tailmouse open on the iPhone.
 7. If only the pings to the iPhone show the pauses, the radio of the iPhone leaves the channel.
 
-To confirm that AWDL on the Mac is the cause, stop it for 60 seconds and do the test again.
+If the radio of the Mac leaves the channel, look at the AirDrop setting first (refer to the remedies below). To confirm that AWDL on the Mac is the cause when the AirDrop setting is not, stop AWDL for 60 seconds and do the test again. This command needs an administrator password.
 
 ```sh
 sudo sh -c 'for i in $(seq 60); do ifconfig awdl0 down; sleep 1; done'
@@ -126,9 +140,11 @@ Use the first remedy that is possible for you.
 
 1. **Use the USB cable.** The USB route does not use a radio.
 2. **Update the iPhone app.** Versions that use AWDL only as a last resort remove the pauses of the iPhone. Alternatively, set **Use AWDL** to off.
-3. **Move the Wi-Fi network to a 5 GHz channel that AWDL uses** (44 or 149). The radio then stays on one channel. This remedy is the common advice for AWDL pauses. It was not tested with Tailmouse.
-4. **Use the Bluetooth route.** It does not use the Wi-Fi radio. The delay is 30 to 60 ms and the pointer gets approximately 30 positions each second. Refer to [The Bluetooth route](#the-bluetooth-route).
-5. **Keep AWDL down on the Mac while you use Tailmouse.** Use the command above. The macOS services that use AWDL stop during that time.
+3. **Set AirDrop on the Mac to Contacts Only or No One.** Open **System Settings › General › AirDrop & Continuity**. The Mac app shows a warning in **Settings › Routes** and in its menu when AirDrop is set to Everyone on a 6 GHz network. AirDrop, Handoff and the other services continue to work.
+4. **Close the AirDrop window in the Finder.**
+5. **Move the Wi-Fi network to a 5 GHz channel that AWDL uses** (44 or 149). The radio then stays on one channel. This remedy is the common advice for AWDL pauses. It was not tested with Tailmouse.
+6. **Use the Bluetooth route.** It does not use the Wi-Fi radio. The delay is 30 to 60 ms and the pointer gets approximately 30 positions each second. Refer to [The Bluetooth route](#the-bluetooth-route).
+7. **Keep AWDL down on the Mac while you use Tailmouse.** Use the command above. The macOS services that use AWDL stop during that time. This is necessary only if the remedies above do not stop the pauses.
 
 ## The jitter log
 

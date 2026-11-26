@@ -11,7 +11,7 @@ Status: early. v1 covers the trackpad and keyboard.
 ## How it works
 
 - The Mac runs a menu bar app that listens on one UDP port (47474 by default) and advertises itself with Bonjour.
-- The iPhone opens a flow on every route it can find: the USB cable, the local network, Bluetooth and each tailnet address of the Mac, and AWDL when none of those answers. It probes all of them once a second and sends on the cable when it is plugged in, otherwise on the fastest one that answers.
+- The iPhone opens a flow on every route it can find: the USB cable, the local network, Bluetooth and each tailnet address of the Mac, and AWDL when none of those answers. On a 6 GHz Wi-Fi network the Mac switches AWDL off, because it makes every Wi-Fi route stutter there. It probes all of them once a second and sends on the cable when it is plugged in, otherwise on the fastest one that answers.
 - Packets are a compact binary layout, 77 bytes for a pointer movement, so the slow Bluetooth link keeps up. The phone and the Mac must run the same build.
 - Pointer movement travels as running totals, so a lost packet costs nothing. Clicks and keys are numbered and resent until the Mac acknowledges them, and run once, in order.
 - Two-finger scrolls keep gliding after you lift your fingers, like a Mac trackpad. The Mac does the glide, so it costs no extra traffic.

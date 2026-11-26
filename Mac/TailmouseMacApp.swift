@@ -1,4 +1,5 @@
 import ApplicationServices
+import CoreWLAN
 import ServiceManagement
 import SwiftUI
 import TailmouseKit
@@ -68,12 +69,31 @@ final class AppModel: ObservableObject {
     }
   }
 
+  /// AWDL lives on 2.4 and 5 GHz. On a 6 GHz network the one radio leaves the
+  /// network about twice a second to serve it, and every Wi-Fi route stalls
+  /// (measured: 120 pings in 500 over 30 ms with the AWDL route on, 0 with it
+  /// off). So there the route is off whatever the switch says.
+  // ponytail: 6 GHz only, because that is what was measured. A 5 GHz network
+  // off channels 44 and 149 probably hops too; widen this when someone measures it.
+  @Published private(set) var on6GHz = Radio.on6GHz {
+    didSet { if on6GHz != oldValue { server.apply(config) } }
+  }
+  /// AirDrop open to everyone keeps the radio hopping the same way.
+  @Published private(set) var airDropEveryone = Radio.airDropEveryone
+
+  var awdlStutters: Bool { on6GHz && airDropEveryone }
+
   private let defaults = UserDefaults.standard
   private let server: Server
   private var axTimer: Timer?
 
   var config: ServerConfig {
-    ServerConfig(port: UInt16(port), routes: routes, pin: Self.effectivePin(requirePin, pin), momentum: momentum)
+    ServerConfig(port: UInt16(port), routes: Self.usable(routes, on6GHz: on6GHz),
+                 pin: Self.effectivePin(requirePin, pin), momentum: momentum)
+  }
+
+  static func usable(_ routes: Set<Route>, on6GHz: Bool) -> Set<Route> {
+    on6GHz ? routes.subtracting([.awdl]) : routes
   }
 
   /// Required but not all four digits in yet: "" lets no one in (fail closed).
@@ -112,7 +132,8 @@ final class AppModel: ObservableObject {
     self.momentum = momentum
     pairing = Pairing(key: key, name: name, port: UInt16(port), hosts: tailnetAddresses())
     server = Server(key: key, name: name, devices: devices, config: ServerConfig(
-      port: UInt16(port), routes: routes, pin: Self.effectivePin(requirePin, pin), momentum: momentum))
+      port: UInt16(port), routes: Self.usable(routes, on6GHz: Radio.on6GHz),
+      pin: Self.effectivePin(requirePin, pin), momentum: momentum))
     server.onDevices = { [weak self] list in
       guard let self else { return }
       // Assign every tick even when equal: "connected" is relative to now.
@@ -132,6 +153,10 @@ final class AppModel: ObservableObject {
         // Tailscale may come up after launch; keep the QR current.
         let hosts = tailnetAddresses()
         if self?.pairing.hosts != hosts { self?.pairing.hosts = hosts }
+        // The Mac roams between bands, and AirDrop is set elsewhere.
+        let (six, everyone) = (Radio.on6GHz, Radio.airDropEveryone)
+        if self?.on6GHz != six { self?.on6GHz = six }
+        if self?.airDropEveryone != everyone { self?.airDropEveryone = everyone }
       }
     }
   }
@@ -165,7 +190,7 @@ final class AppModel: ObservableObject {
   }
 
   func route(_ r: Route) -> Binding<Bool> {
-    Binding(get: { self.routes.contains(r) },
+    Binding(get: { self.routes.contains(r) && !(r == .awdl && self.on6GHz) },
             set: { on in if on { self.routes.insert(r) } else { self.routes.remove(r) } })
   }
 }
@@ -183,6 +208,7 @@ struct MenuContent: View {
     }
     Text(model.state)
     if let e = model.keychainError { Text(e) }
+    if model.awdlStutters { Text("AirDrop is open to Everyone: the pointer will stutter") }
     if !model.trusted {
       Button("Grant Accessibility…") { model.promptAccessibility() }
     }
@@ -299,10 +325,25 @@ struct SettingsTab: View {
             Toggle(isOn: model.route(r)) {
               VStack(alignment: .leading, spacing: 2) {
                 Text(r.title)
-                note(r.detail)
+                note(r == .awdl && model.on6GHz ? Route.awdlOn6GHz : r.detail)
               }
             }
             .accessibilityLabel(r.title)
+            .disabled(r == .awdl && model.on6GHz)
+          }
+          if model.awdlStutters {
+            Label {
+              VStack(alignment: .leading, spacing: 4) {
+                Text("AirDrop is open to Everyone. On this 6 GHz network that makes the pointer stop about twice a second on every Wi-Fi route. Set AirDrop to Contacts Only or No One.")
+                  .fixedSize(horizontal: false, vertical: true)
+                Button("Open AirDrop Settings…") { NSWorkspace.shared.open(Radio.airDropSettings) }
+              }
+            } icon: {
+              Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            }
+            .font(.caption)
+            .padding(10)
+            .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
           }
           note("The iPhone uses the cable when it is plugged in, otherwise the fastest route that answers, and switches when one stops.")
         }
@@ -346,6 +387,8 @@ extension Route {
     case .ble: "Bluetooth"
     }
   }
+
+  static let awdlOn6GHz = "Off while this Mac is on a 6 GHz Wi-Fi network. AWDL works on 2.4 and 5 GHz only, so the Wi-Fi radio would leave the network about twice a second and every Wi-Fi route would stutter. It comes back on a 2.4 or 5 GHz network."
 
   var detail: String {
     switch self {
@@ -439,5 +482,18 @@ func copySecret(_ s: String) {
   let count = pb.changeCount
   DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
     if pb.changeCount == count { pb.clearContents() }
+  }
+}
+
+/// What macOS says about the two things that make the Wi-Fi radio hop.
+enum Radio {
+  static let airDropSettings = URL(string: "x-apple.systempreferences:com.apple.AirDrop-Handoff-Settings.extension")!
+
+  static var on6GHz: Bool { CWWiFiClient.shared().interface()?.wlanChannel()?.channelBand == .band6GHz }
+
+  static var airDropEveryone: Bool {
+    let app = "com.apple.sharingd" as CFString
+    CFPreferencesAppSynchronize(app)
+    return CFPreferencesCopyAppValue("DiscoverableMode" as CFString, app) as? String == "Everyone"
   }
 }
