@@ -1,5 +1,7 @@
 import Foundation
+import IOKit
 import Network
+import os
 import TailmouseKit
 
 /// What the settings window controls.
@@ -46,6 +48,22 @@ final class Server {
   private static let maxConnections = 32
   private static let maxDevices = 50
   private var timer: DispatchSourceTimer?
+  /// A menu bar app with no window is an App Nap candidate; napping delays
+  /// the queue. Idle system sleep stays allowed.
+  private let activity = ProcessInfo.processInfo.beginActivity(
+    options: [.latencyCritical, .userInitiatedAllowingIdleSystemSleep], reason: "Posting pointer input")
+
+  /// Timing per route for one second of traffic, to tell a stalling phone
+  /// (send gaps) from a stalling network (late). Switch on with
+  /// `defaults write <bundle id> jitterLog -bool YES`, read with
+  /// `log stream --predicate 'subsystem == "tailmouse"'`.
+  private struct Jitter {
+    var n = 0, sendGap = 0.0, arriveGap = 0.0, late = 0.0
+    var lastSent = 0.0, lastArrived = 0.0, minDelay = Double.infinity
+  }
+  private var jitter: [Route: Jitter] = [:]
+  private let jitterLog = UserDefaults.standard.bool(forKey: "jitterLog")
+  private let log = Logger(subsystem: "tailmouse", category: "jitter")
 
   init(key: Data, name: String, devices: [DeviceRecord], config: ServerConfig) {
     self.name = name
@@ -136,7 +154,7 @@ final class Server {
 
   private func accept(_ c: NWConnection) {
     guard connections.count < Self.maxConnections else { c.cancel(); return }
-    connections[ObjectIdentifier(c)] = (c, Route.of(c.endpoint), now(), false)
+    connections[ObjectIdentifier(c)] = (c, Route.of(c.endpoint, isUSB: isPhoneUSB), now(), false)
     c.stateUpdateHandler = { [weak self, weak c] state in
       guard let self, let c else { return }
       switch state {
@@ -168,6 +186,7 @@ final class Server {
     }
     connections[id]?.lastSeen = now()
     connections[id]?.authed = true
+    if jitterLog { note(packet, route: entry.route) }
     let (reply, actions) = sessions.receive(packet, now: now())
     actions.forEach(input.perform)
     if let out = try? seal.seal(reply) {
@@ -183,8 +202,29 @@ final class Server {
     }
   }
 
+  private func note(_ p: Packet, route: Route) {
+    let t = now()
+    var j = jitter[route] ?? Jitter()
+    // A gap over 0.25 s is a lifted finger (the 1 s probe), not a stall.
+    let sent = p.time - j.lastSent, arrived = t - j.lastArrived
+    if sent > 0, sent < 0.25 { j.sendGap = max(j.sendGap, sent) }
+    if arrived < 0.25 { j.arriveGap = max(j.arriveGap, arrived) }
+    // The phone's clock stops while it sleeps, so start over after a silence.
+    if arrived > 3 { j.minDelay = .infinity }
+    j.minDelay = min(j.minDelay, t - p.time)
+    j.late = max(j.late, t - p.time - j.minDelay)
+    j.n += 1
+    j.lastSent = max(j.lastSent, p.time)
+    j.lastArrived = t
+    jitter[route] = j
+  }
+
   private func housekeeping() {
     let t = now()
+    for (route, j) in jitter where j.n > 5 {
+      log.notice("\(route.rawValue, privacy: .public) n=\(j.n) sendGap=\(j.sendGap * 1000, format: .fixed(precision: 1)) arriveGap=\(j.arriveGap * 1000, format: .fixed(precision: 1)) late=\(j.late * 1000, format: .fixed(precision: 1)) ms")
+    }
+    for route in jitter.keys { (jitter[route]!.n, jitter[route]!.sendGap, jitter[route]!.arriveGap, jitter[route]!.late) = (0, 0, 0, 0) }
     if sessions.expire(now: t) { input.releaseAll() }
     for (id, entry) in connections where t - entry.lastSeen > (entry.authed ? 30 : 3) {
       entry.conn.cancel()
@@ -199,4 +239,26 @@ final class Server {
   }
 
   private func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+}
+
+/// Whether a network interface is an iPhone's USB cable: an NCM function of an
+/// Apple USB device. A USB Ethernet adapter is a LAN and doesn't match.
+func isPhoneUSB(_ bsdName: String) -> Bool {
+  guard !bsdName.isEmpty, let match = IOBSDNameMatching(kIOMainPortDefault, 0, bsdName) else { return false }
+  var entry = IOServiceGetMatchingService(kIOMainPortDefault, match)
+  var ncm = false
+  while entry != 0 {
+    if IOObjectConformsTo(entry, "AppleUSBNCMData") != 0 { ncm = true }
+    if IOObjectConformsTo(entry, "IOUSBHostDevice") != 0 {
+      let vendor = IORegistryEntryCreateCFProperty(entry, "idVendor" as CFString, kCFAllocatorDefault, 0)?
+        .takeRetainedValue() as? Int
+      IOObjectRelease(entry)
+      return ncm && vendor == 0x05AC
+    }
+    var parent: io_registry_entry_t = 0
+    IORegistryEntryGetParentEntry(entry, kIOServicePlane, &parent)
+    IOObjectRelease(entry)
+    entry = parent
+  }
+  return false
 }

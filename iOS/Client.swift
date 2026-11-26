@@ -7,7 +7,7 @@ import UIKit
 ///
 /// Opens one UDP flow per path: each tailnet address from the pairing, and the
 /// Mac's Bonjour service on every interface it shows up on (Wi-Fi = LAN,
-/// awdl0 = AWDL). Every path is probed once a second; hot traffic goes to the
+/// awdl0 = AWDL, wired = the USB cable). Every path is probed once a second; hot traffic goes to the
 /// fastest live one (`PathPicker`). All on the main queue: touches arrive
 /// there, and a send is a few microseconds.
 @MainActor
@@ -24,6 +24,9 @@ final class Client: ObservableObject {
   var interpreter = TouchInterpreter()
   /// Shown in the Mac's device list. Set from Settings.
   var deviceName = UIDevice.current.name
+  /// Off: no AWDL browse or flow. An active AWDL makes the Wi-Fi radio hop
+  /// channels, which can add lag spikes to the LAN path too.
+  var useAWDL = UserDefaults.standard.object(forKey: "awdl") as? Bool ?? true
 
   /// New per launch, so the Mac starts a fresh session (see `Packet.client`).
   private let clientID = UInt64.random(in: 1...UInt64.max)
@@ -58,8 +61,14 @@ final class Client: ObservableObject {
 
   init() {
     if let p = PairingStore.load() { use(p) }
+    // Path updates arrive every few seconds with a cable or AWDL in play, and
+    // a rebuild stalls the pointer until Bonjour resolves again. So rebuild
+    // only when nothing answers; the browser adds new interfaces by itself.
     monitor.pathUpdateHandler = { [weak self] _ in
-      Task { @MainActor in self?.reconnect() }
+      Task { @MainActor in
+        guard let self, self.now() - self.lastReply > 1.5 else { return }
+        self.reconnect()
+      }
     }
     monitor.start(queue: .main)
     probeTimer = Timer.scheduledTimer(withTimeInterval: Wire.keepalive, repeats: true) { [weak self] _ in
@@ -170,10 +179,9 @@ final class Client: ObservableObject {
     lastReply = now()
     guard let p = pairing else { return }
     for host in p.hosts {
-      open("Tailnet", NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: p.port)!, using: .udp))
+      open("Tailnet", NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: p.port)!, using: udp(p2p: false)))
     }
-    let params = NWParameters.udp
-    params.includePeerToPeer = true
+    let params = udp(p2p: useAWDL)
     let b = NWBrowser(for: .bonjour(type: Wire.bonjourType, domain: nil), using: params)
     b.browseResultsChangedHandler = { [weak self] results, _ in
       Task { @MainActor in self?.found(results) }
@@ -189,35 +197,50 @@ final class Client: ObservableObject {
       // One flow per interface, pinned to it. An unpinned UDP flow would settle
       // on Wi-Fi even where client isolation drops every packet.
       for iface in r.interfaces {
+        // ponytail: anything that isn't Wi-Fi or AWDL counts as the cable, so
+        // a USB-C Ethernet adapter on the phone reads "USB" here. The Mac's
+        // own classification (`isPhoneUSB`) is what its route switches use.
         let label = iface.name.hasPrefix("awdl") ? "AWDL"
-          : [.wifi, .wiredEthernet, .loopback].contains(iface.type) ? "LAN" : iface.name
-        guard pinned.insert(iface.name).inserted else { continue }
-        let params = NWParameters.udp
-        params.includePeerToPeer = true
+          : [.wifi, .loopback].contains(iface.type) ? "LAN" : PathPicker.wired
+        guard useAWDL || label != "AWDL", pinned.insert(iface.name).inserted else { continue }
+        let params = udp(p2p: useAWDL)
         params.requiredInterface = iface
-        open(label, NWConnection(to: r.endpoint, using: params))
+        open(label, NWConnection(to: r.endpoint, using: params), iface: iface.name)
       }
     }
   }
 
-  private func open(_ label: String, _ c: NWConnection) {
+  private func udp(p2p: Bool) -> NWParameters {
+    let params = NWParameters.udp
+    params.includePeerToPeer = p2p
+    // Wi-Fi sends this ahead of bulk traffic (WMM voice queue).
+    params.serviceClass = .interactiveVoice
+    return params
+  }
+
+  private func open(_ label: String, _ c: NWConnection, iface: String? = nil) {
     var label = label
     var n = 2
     while flows[label] != nil { label = "\(label.split(separator: " ")[0]) \(n)"; n += 1 }
     flows[label] = c
     paths = flows.keys.sorted()
-    c.stateUpdateHandler = { [weak self] state in
-      if case .failed = state {
-        Task { @MainActor in
-          self?.flows[label] = nil
-          self?.picker.remove(path: label)
-          self?.paths = self?.flows.keys.sorted() ?? []
+    c.stateUpdateHandler = { [weak self, weak c] state in
+      Task { @MainActor in
+        guard let self, let c, self.flows[label] === c else { return }
+        switch state {
+        case .ready: self.send(to: [c])   // the hello
+        case .failed:
+          // Unpinned, so the browser can open it again (cable plugged back in).
+          if let iface { self.pinned.remove(iface) }
+          self.flows[label] = nil
+          self.picker.remove(path: label)
+          self.paths = self.flows.keys.sorted()
+        default: break
         }
       }
     }
     c.start(queue: .main)
     receive(label, c)
-    send(to: [c])
   }
 
   private func receive(_ label: String, _ c: NWConnection) {
@@ -237,8 +260,13 @@ final class Client: ObservableObject {
     let t = now()
     lastReply = t
     picker.replied(path: label, rtt: t - reply.echo, now: t)
-    path = picker.active
-    rtt = path.flatMap(picker.rtt(of:))
+    // The Mac answers every packet, and a @Published write redraws the whole
+    // UI on the thread that handles touches even when the value is the same.
+    // So: publish only changes, and the RTT once a second from `probe`.
+    if path != picker.active {
+      path = picker.active
+      rtt = path.flatMap(picker.rtt(of:))
+    }
     guard reply.echo >= newestEcho else { return }
     newestEcho = reply.echo
     if reply.session != session {
@@ -246,14 +274,14 @@ final class Client: ObservableObject {
       outbox.restart()
     }
     outbox.ack(reply.ack)
-    needsPin = reply.pin != nil
+    if needsPin != (reply.pin != nil) { needsPin = reply.pin != nil }
     if reply.pin == .wrong, pairing?.pin != nil {
       // Stop sending it: the Mac counts each distinct wrong PIN.
       pinWasWrong = true
       pairing?.pin = nil
       PairingStore.save(pairing)
     }
-    macName = reply.name
+    if macName != reply.name { macName = reply.name }
   }
 
   private func probe() {
@@ -280,7 +308,10 @@ final class Client: ObservableObject {
                    device: deviceID, name: deviceName,
                    via: picker.active.map { String($0.split(separator: " ")[0]) }, pin: pairing?.pin)
     guard let data = try? seal.seal(p) else { return }
-    for c in targets { c.send(content: data, completion: .idempotent) }
+    // Ready flows only. A flow that is still resolving or waiting for a route
+    // queues every send, and cancelling it with a few thousand queued crashes
+    // inside Network.framework (it frees the queue recursively).
+    for c in targets where c.state == .ready { c.send(content: data, completion: .idempotent) }
   }
 
   private func teardown() {

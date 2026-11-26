@@ -90,6 +90,16 @@ private func lastMotion(_ out: [TouchInterpreter.Output]) -> Motion? {
   #expect(p.choose(now: 10) == nil)
 }
 
+@Test func liveCableBeatsFasterLookingRadio() {
+  var p = PathPicker()
+  p.replied(path: "LAN", rtt: 0.002, now: 0)
+  p.replied(path: "USB", rtt: 0.003, now: 0.1)             // slower sample, still wins
+  #expect(p.active == "USB")
+  p.replied(path: "LAN", rtt: 0.001, now: 2.0)
+  #expect(p.active == "USB")
+  #expect(p.choose(now: 3.0) == "LAN")                     // cable unplugged
+}
+
 // MARK: - Momentum
 
 @Test func flickGlidesAndSlowsDown() {

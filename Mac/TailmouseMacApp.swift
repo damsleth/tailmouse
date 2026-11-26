@@ -97,7 +97,13 @@ final class AppModel: ObservableObject {
     }
     let d = UserDefaults.standard
     let port = (d.object(forKey: "port") as? Int).flatMap { (1024...65535).contains($0) ? $0 : nil } ?? Int(Wire.defaultPort)
-    let routes = Set((d.stringArray(forKey: "routes") ?? Route.allCases.map(\.rawValue)).compactMap(Route.init))
+    var routes = Set((d.stringArray(forKey: "routes") ?? Route.allCases.map(\.rawValue)).compactMap(Route.init))
+    // USB came after the first release: on by default for saved settings too.
+    if !d.bool(forKey: "routesHaveUSB") {
+      routes.insert(.usb)
+      d.set(true, forKey: "routesHaveUSB")
+      d.set(routes.map(\.rawValue), forKey: "routes")
+    }
     let requirePin = d.bool(forKey: "requirePin")
     let momentum = d.object(forKey: "momentum") as? Double ?? 0.5
     let pin = (try? KeyStore.load("pin")).flatMap { $0.flatMap { String(data: $0, encoding: .utf8) } } ?? ""
@@ -298,7 +304,7 @@ struct SettingsTab: View {
             }
             .accessibilityLabel(r.title)
           }
-          note("The iPhone uses the fastest route that answers and switches when it stops.")
+          note("The iPhone uses the cable when it is plugged in, otherwise the fastest route that answers, and switches when one stops.")
         }
       }
       .padding(.top, 12)
@@ -333,6 +339,7 @@ struct SettingsTab: View {
 extension Route {
   var title: String {
     switch self {
+    case .usb: "USB cable"
     case .lan: "Local network"
     case .awdl: "Peer-to-peer Wi-Fi (AWDL)"
     case .tailnet: "Tailnet"
@@ -341,6 +348,7 @@ extension Route {
 
   var detail: String {
     switch self {
+    case .usb: "The iPhone plugged into this Mac. The fastest and steadiest route; used whenever it answers."
     case .lan: "Wi-Fi or Ethernet, found with Bonjour. Blocked on networks that isolate clients."
     case .awdl: "The direct link AirDrop uses. Works on isolated networks when the iPhone is nearby."
     case .tailnet: "Through Tailscale, from anywhere. Slow when Tailscale has to relay (DERP)."

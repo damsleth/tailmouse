@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Tailmouse turns an iPhone into a trackpad and keyboard for a Mac. Both ends are native Swift. They talk over one UDP socket that works over the LAN (Bonjour), over AWDL (Apple peer-to-peer Wi-Fi, the AirDrop link) and over a tailnet (Tailscale). The phone probes all three and uses the fastest live one. AWDL and the tailnet get around Wi-Fi client isolation; AWDL avoids the DERP relay detour.
+Tailmouse turns an iPhone into a trackpad and keyboard for a Mac. Both ends are native Swift. They talk over one UDP socket that works over a USB cable, over the LAN (Bonjour), over AWDL (Apple peer-to-peer Wi-Fi, the AirDrop link) and over a tailnet (Tailscale). The phone probes all four and uses the cable when it answers, otherwise the fastest live one. AWDL and the tailnet get around Wi-Fi client isolation; AWDL avoids the DERP relay detour.
 
 ## Layout and commands
 
@@ -36,11 +36,16 @@ Each of these has a test in `TailmouseKitTests`. Keep the tests green when you c
 - macOS Accessibility (TCC) permission is tied to the code signature. An ad-hoc signed build loses the permission on every rebuild. Sign with the team in `Config/Local.xcconfig`; see the `.example` file.
 - `security find-identity -v -p codesigning` lists 0 valid identities while an Apple Development cert is present: the Apple WWDR G3 intermediate is missing from the login keychain.
 - Paths: the phone opens one flow per tailnet host and one per Bonjour interface, each pinned with `requiredInterface`. An unpinned UDP flow to a Bonjour service settles on Wi-Fi and stays there, even when client isolation drops every packet. AWDL comes from `includePeerToPeer` on both the listener and the browser.
+- The phone sends only on flows in `.ready`. An `NWConnection` that is still resolving or waiting queues every send, and cancelling one with a few thousand queued overflows the stack in Network.framework's recursive dealloc (SIGBUS in `NWConcrete_nw_write_request dealloc`). The 1 s probe fills such a queue in under an hour while another path keeps the session alive.
+- USB: a plugged-in iPhone shows up on the Mac as two NCM Ethernet interfaces (`enN`, link-local only, absent from `networksetup`), and Bonjour runs on them, so the cable needs no code of its own beyond a name. The phone labels any Bonjour interface that is not Wi-Fi or AWDL "USB"; the Mac recognises the interface in the IORegistry (`isPhoneUSB`: `AppleUSBNCMData` under an Apple `IOUSBHostDevice`). `PathPicker` picks a live "USB" path over any radio, whatever the RTTs say. The simulator has no cable; `lsof -nP -a -c Tailmouse -iUDP` on the Mac shows whether a real phone has a flow on the USB interface.
+- The phone rebuilds its flows (`reconnect`) on a network path update only when nothing has answered for 1.5 s. Path updates come every few seconds with a cable or AWDL around, and each rebuild stalls the pointer while Bonjour resolves. New interfaces arrive through the browser instead.
 - The Mac caps flows at 32. A flow whose first datagram fails to open is cancelled, and flows that never authenticated go after 3 s.
 - `make install-mac` installs a Release build: a Debug build carries `get-task-allow`, so any same-user process could attach to an app that holds Accessibility.
 - The iOS app refuses third-party keyboards (`AppDelegate`), since everything typed goes to the Mac.
 - Route switches are enforced on the Mac: `Route.of` classifies each flow by the phone's address and a switched-off route gets no reply, so the phone's picker drops it. The Devices list shows the path the phone reports in `Packet.via` instead, because probes reach the Mac on every route.
 - The iOS IPA ships unsigned (`make ipa`), and SideStore re-signs it on the phone.
+- Pointer stutter: `defaults write <Mac bundle id> jitterLog -bool YES`, restart the Mac app, then `/usr/bin/log stream --predicate 'subsystem == "tailmouse"'` prints one line per route per second of traffic. `sendGap` spikes mean the phone stalled, `late` spikes with a steady `sendGap` mean the radio or network did. The phone's "Use AWDL" switch drops the AWDL browse and flow, for telling AWDL channel hopping apart from plain Wi-Fi jitter.
+- `Client` publishes only changed values from `received`: the Mac answers every packet, and each `@Published` write redraws the UI on the thread that handles touches.
 - Raw UIKit touches with coalesced touches drive the trackpad. The screen has to stay at 120 Hz while a finger is down, because iOS delivers touches in step with the display.
 - Mac input code ported from Entangle (MIT, (c) 2026 Gabriel Donadel) keeps that notice next to it.
 

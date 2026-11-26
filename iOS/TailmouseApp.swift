@@ -18,6 +18,7 @@ struct TailmouseApp: App {
   @AppStorage("sensitivity") private var sensitivity = 1.5
   @AppStorage("naturalScroll") private var naturalScroll = true
   @AppStorage("deviceName") private var deviceName = ""
+  @AppStorage("awdl") private var awdl = true
 
   var body: some Scene {
     WindowGroup {
@@ -45,6 +46,7 @@ struct TailmouseApp: App {
       .onChange(of: sensitivity) { applySettings() }
       .onChange(of: naturalScroll) { applySettings() }
       .onChange(of: deviceName) { applySettings() }
+      .onChange(of: awdl) { applySettings(); client.reconnect() }
       // iOS tears down sockets in the background; start over on return.
       .onChange(of: phase) { if phase == .active { client.reconnect() } }
     }
@@ -54,6 +56,7 @@ struct TailmouseApp: App {
     client.interpreter.sensitivity = sensitivity
     client.interpreter.naturalScroll = naturalScroll
     client.deviceName = deviceName.isEmpty ? UIDevice.current.name : deviceName
+    client.useAWDL = awdl
   }
 }
 
@@ -103,6 +106,7 @@ struct SettingsScreen: View {
   @AppStorage("sensitivity") private var sensitivity = 1.5
   @AppStorage("naturalScroll") private var naturalScroll = true
   @AppStorage("deviceName") private var deviceName = ""
+  @AppStorage("awdl") private var awdl = true
 
   var body: some View {
     NavigationStack {
@@ -112,6 +116,11 @@ struct SettingsScreen: View {
           LabeledContent("Status", value: client.status)
           LabeledContent("Paths", value: client.paths.isEmpty ? "–" : client.paths.joined(separator: ", "))
           Button("Reconnect") { client.reconnect() }
+        }
+        Section {
+          Toggle("Use AWDL", isOn: $awdl)
+        } footer: {
+          Text("Peer-to-peer Wi-Fi reaches the Mac where the network blocks devices from each other. Turn off if the pointer stutters on a normal Wi-Fi.")
         }
         Section {
           TextField(UIDevice.current.name, text: $deviceName)

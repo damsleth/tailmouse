@@ -2,13 +2,18 @@ import Network
 
 /// How a phone's packets reach the Mac. The Mac can switch each one off.
 public enum Route: String, CaseIterable, Codable, Identifiable, Sendable {
-  case lan, awdl, tailnet
+  case usb, lan, awdl, tailnet
 
   public var id: Self { self }
 
   /// Classifies a flow by the phone's address: tailnet ranges first, then the
-  /// link-local AWDL interface; anything else came over the local network.
-  public static func of(_ endpoint: NWEndpoint) -> Route {
+  /// interface of a link-local address (AWDL, or the phone's USB cable, which
+  /// only the caller can recognise); anything else came over the local network.
+  ///
+  /// ponytail: an IPv4 flow over the cable (169.254/16) carries no interface
+  /// and counts as LAN. Bonjour picks IPv6 link-local there; classify from the
+  /// connection's path if that ever changes.
+  public static func of(_ endpoint: NWEndpoint, isUSB: (String) -> Bool = { _ in false }) -> Route {
     guard case .hostPort(let host, _) = endpoint else { return .lan }
     switch host {
     case .ipv4(let a):
@@ -17,7 +22,7 @@ public enum Route: String, CaseIterable, Codable, Identifiable, Sendable {
       if let v4 = a.asIPv4 { return isTailnet(v4) ? .tailnet : .lan }
       if a.rawValue.starts(with: [0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0]) { return .tailnet }  // fd7a:115c:a1e0::/48
       let iface = a.interface?.name ?? "\(host)".split(separator: "%").last.map(String.init) ?? ""
-      return iface.hasPrefix("awdl") ? .awdl : .lan
+      return iface.hasPrefix("awdl") ? .awdl : isUSB(iface) ? .usb : .lan
     default:
       return .lan
     }

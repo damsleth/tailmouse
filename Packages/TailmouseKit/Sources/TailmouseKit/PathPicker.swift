@@ -2,7 +2,9 @@
 ///
 /// Every path is probed about once a second; the hot path is the live one with
 /// the lowest smoothed RTT. A path stays chosen until another is clearly
-/// faster, so jitter does not flap between two similar paths.
+/// faster, so jitter does not flap between two similar paths. A live cable
+/// (`wired`) always wins: it has no radio to stall, and its lead over a good
+/// Wi-Fi is smaller than the switch margin.
 public struct PathPicker: Sendable {
   struct Stat { var srtt: Double; var lastReply: Double; var samples = 1 }
 
@@ -11,6 +13,8 @@ public struct PathPicker: Sendable {
   /// Switch only when the other path is this much faster (ratio and absolute).
   public static let switchRatio = 0.7
   public static let switchMargin = 0.003
+  /// Label prefix of the cable paths ("USB", "USB 2").
+  public static let wired = "USB"
 
   private var stats: [String: Stat] = [:]
   public private(set) var active: String?
@@ -40,7 +44,9 @@ public struct PathPicker: Sendable {
 
   @discardableResult
   public mutating func choose(now: Double) -> String? {
-    let alive = stats.filter { now - $0.value.lastReply <= Self.deadAfter }
+    var alive = stats.filter { now - $0.value.lastReply <= Self.deadAfter }
+    let wired = alive.filter { $0.key.hasPrefix(Self.wired) }
+    if !wired.isEmpty { alive = wired }
     guard let best = alive.min(by: { $0.value.srtt < $1.value.srtt }) else {
       active = nil
       return nil
