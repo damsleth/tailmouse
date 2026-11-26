@@ -15,13 +15,14 @@ targets:
   TailmouseMac:
     type: application
     platform: macOS
-    sources: [Mac]
+    sources: [Mac, Shared]
     dependencies:
       - package: TailmouseKit
     info:
       path: Mac/Info.plist
       properties:
         TailmouseRepo: $(REPO_SLUG)
+        NSBluetoothAlwaysUsageDescription: Tailmouse can take input from your iPhone over Bluetooth.
     settings:
       base:
         PRODUCT_NAME: Tailmouse
@@ -37,7 +38,7 @@ targets:
   Tailmouse:
     type: application
     platform: iOS
-    sources: [iOS]
+    sources: [iOS, Shared]
     dependencies:
       - package: TailmouseKit
     info:
@@ -47,6 +48,7 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         CADisableMinimumFrameDurationOnPhone: true
+        NSBluetoothAlwaysUsageDescription: Tailmouse can reach your Mac over Bluetooth when Wi-Fi is unsteady.
         NSLocalNetworkUsageDescription: Tailmouse finds and talks to your Mac on the local network.
         NSBonjourServices: [_tailmouse._udp]
         CFBundleURLTypes:

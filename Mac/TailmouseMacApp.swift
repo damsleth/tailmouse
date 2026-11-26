@@ -98,10 +98,10 @@ final class AppModel: ObservableObject {
     let d = UserDefaults.standard
     let port = (d.object(forKey: "port") as? Int).flatMap { (1024...65535).contains($0) ? $0 : nil } ?? Int(Wire.defaultPort)
     var routes = Set((d.stringArray(forKey: "routes") ?? Route.allCases.map(\.rawValue)).compactMap(Route.init))
-    // USB came after the first release: on by default for saved settings too.
-    if !d.bool(forKey: "routesHaveUSB") {
-      routes.insert(.usb)
-      d.set(true, forKey: "routesHaveUSB")
+    // Routes added after the first release: on by default for saved settings too.
+    for (route, seen) in [(Route.usb, "routesHaveUSB"), (.ble, "routesHaveBLE")] where !d.bool(forKey: seen) {
+      routes.insert(route)
+      d.set(true, forKey: seen)
       d.set(routes.map(\.rawValue), forKey: "routes")
     }
     let requirePin = d.bool(forKey: "requirePin")
@@ -343,6 +343,7 @@ extension Route {
     case .lan: "Local network"
     case .awdl: "Peer-to-peer Wi-Fi (AWDL)"
     case .tailnet: "Tailnet"
+    case .ble: "Bluetooth"
     }
   }
 
@@ -352,6 +353,7 @@ extension Route {
     case .lan: "Wi-Fi or Ethernet, found with Bonjour. Blocked on networks that isolate clients."
     case .awdl: "The direct link AirDrop uses. Works on isolated networks when the iPhone is nearby."
     case .tailnet: "Through Tailscale, from anywhere. Slow when Tailscale has to relay (DERP)."
+    case .ble: "Bluetooth LE, nearby. Slower than Wi-Fi but steady where Wi-Fi stutters; switch the Wi-Fi routes off to use it."
     }
   }
 }

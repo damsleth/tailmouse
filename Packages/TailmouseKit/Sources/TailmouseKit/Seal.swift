@@ -20,19 +20,18 @@ public struct Seal: Sendable {
 
   public static func newKey() -> SymmetricKey { SymmetricKey(size: .bits256) }
 
-  public func seal<T: Encodable>(_ value: T) throws -> Data {
-    let plain = try JSONEncoder().encode(value)
-    let box = try ChaChaPoly.seal(plain, using: key, authenticating: Self.header)
+  public func seal<T: WireCoded>(_ value: T) throws -> Data {
+    let box = try ChaChaPoly.seal(value.wire, using: key, authenticating: Self.header)
     return Self.header + box.combined
   }
 
-  public func open<T: Decodable>(_ type: T.Type, from datagram: Data) -> T? {
+  public func open<T: WireCoded>(_ type: T.Type, from datagram: Data) -> T? {
     guard datagram.count > Self.header.count,
           datagram.prefix(Self.header.count) == Self.header,
           let box = try? ChaChaPoly.SealedBox(combined: datagram.dropFirst(Self.header.count)),
           let plain = try? ChaChaPoly.open(box, using: key, authenticating: Self.header)
     else { return nil }
-    return try? JSONDecoder().decode(type, from: plain)
+    return T(wire: plain)
   }
 }
 

@@ -2,7 +2,7 @@ import Network
 
 /// How a phone's packets reach the Mac. The Mac can switch each one off.
 public enum Route: String, CaseIterable, Codable, Identifiable, Sendable {
-  case usb, lan, awdl, tailnet
+  case usb, lan, awdl, tailnet, ble
 
   public var id: Self { self }
 

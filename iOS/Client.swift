@@ -17,6 +17,8 @@ final class Client: ObservableObject {
   @Published private(set) var path: String?
   @Published private(set) var rtt: Double?
   @Published private(set) var paths: [String] = []
+  /// What the Bluetooth route is doing, for Settings.
+  @Published private(set) var bleState = "off"
   /// The Mac wants a PIN before it starts a session.
   @Published private(set) var needsPin = false
   @Published private(set) var pinWasWrong = false
@@ -52,7 +54,11 @@ final class Client: ObservableObject {
   /// acks, or keep a dead path looking alive.
   private var newestEcho = -Double.infinity
   private var newestEchoOnPath: [String: Double] = [:]
-  private var flows: [String: NWConnection] = [:]
+  private var flows: [String: Flow] = [:]
+  /// The Bluetooth route keeps itself up: it takes seconds to set up, so it
+  /// stays out of `reconnect`, and its flow lives under `bleLabel`.
+  private let ble = BLECentral()
+  private static let bleLabel = "BLE"
   private var browser: NWBrowser?
   /// Interfaces that already have a Bonjour flow; `open` numbers duplicate labels.
   private var pinned: Set<String> = []
@@ -63,6 +69,8 @@ final class Client: ObservableObject {
   private let dragHaptic = UIImpactFeedbackGenerator(style: .medium)
 
   init() {
+    ble.onState = { [weak self] s in MainActor.assumeIsolated { self?.bleState = s } }
+    ble.onLink = { [weak self] link in MainActor.assumeIsolated { self?.bluetooth(link) } }
     if let p = PairingStore.load() { use(p) }
     // Path updates arrive every few seconds with a cable or AWDL in play, and
     // a rebuild stalls the pointer until Bonjour resolves again. So rebuild
@@ -81,7 +89,7 @@ final class Client: ObservableObject {
     resendTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
       Task { @MainActor in
         guard let self, !self.outbox.pending.isEmpty else { return }
-        self.send(to: self.hotFlows())
+        self.send(to: self.hotFlows(), identity: false)
       }
     }
   }
@@ -126,6 +134,7 @@ final class Client: ObservableObject {
     PairingStore.save(nil)
     pairing = nil
     seal = nil
+    ble.stop()
     teardown()
   }
 
@@ -140,6 +149,7 @@ final class Client: ObservableObject {
     needsPin = false
     pinWasWrong = false
     macName = p.name
+    ble.start(key: p.key)
     reconnect()
   }
 
@@ -155,7 +165,7 @@ final class Client: ObservableObject {
 
   func send(_ event: Event) {
     outbox.push(event, time: now())
-    send(to: hotFlows())
+    send(to: hotFlows(), identity: false)
   }
 
   private func handle(_ outputs: [TouchInterpreter.Output]) {
@@ -171,7 +181,7 @@ final class Client: ObservableObject {
       case .haptic: tapHaptic.impactOccurred()
       }
     }
-    if dirty { send(to: hotFlows()) }
+    if dirty { send(to: hotFlows(), identity: false) }
   }
 
   // MARK: Paths
@@ -214,6 +224,14 @@ final class Client: ObservableObject {
         open(label, NWConnection(to: r.endpoint, using: params), iface: iface.name)
       }
     }
+  }
+
+  private func bluetooth(_ link: BLELink?) {
+    flows[Self.bleLabel] = link
+    paths = flows.keys.sorted()
+    guard let link else { return picker.remove(path: Self.bleLabel) }
+    link.onDatagram = { [weak self] data in MainActor.assumeIsolated { self?.received(data, via: Self.bleLabel) } }
+    send(to: [link])
   }
 
   private func udp(p2p: Bool) -> NWParameters {
@@ -302,34 +320,37 @@ final class Client: ObservableObject {
     send(to: Array(flows.values))
   }
 
-  private func hotFlows() -> [NWConnection] {
+  private func hotFlows() -> [Flow] {
     if let a = picker.active, let c = flows[a] { return [c] }
     return Array(flows.values)
   }
 
-  private func send(to targets: [NWConnection]) {
+  /// `identity` (device, name, path) rides on hellos and the 1 s probe only:
+  /// it is half of a pointer packet, and Bluetooth carries few bytes.
+  private func send(to targets: [Flow], identity: Bool = true) {
     guard let seal, !targets.isEmpty else { return }
     // Before the Mac issues a session nothing would run, so send nothing but the hello.
     let live = session != 0
     let p = Packet(client: clientID, session: session, time: now(),
                    motion: live ? motion : nil, events: live ? outbox.pending : [],
-                   device: deviceID, name: deviceName,
-                   via: picker.active.map { String($0.split(separator: " ")[0]) }, pin: pairing?.pin)
+                   device: identity ? deviceID : nil, name: identity ? deviceName : nil,
+                   via: identity ? picker.active.map { String($0.split(separator: " ")[0]) } : nil, pin: pairing?.pin)
     guard let data = try? seal.seal(p) else { return }
     // Ready flows only. A flow that is still resolving or waiting for a route
     // queues every send, and cancelling it with a few thousand queued crashes
     // inside Network.framework (it frees the queue recursively).
-    for c in targets where c.state == .ready { c.send(content: data, completion: .idempotent) }
+    for c in targets where c.isReady { c.transmit(data) }
   }
 
   private func teardown() {
     browser?.cancel()
     browser = nil
-    flows.values.forEach { $0.cancel() }
-    flows.removeAll()
+    let kept = flows[Self.bleLabel]
+    for (label, flow) in flows where label != Self.bleLabel { flow.stop() }
+    flows = kept.map { [Self.bleLabel: $0] } ?? [:]
     pinned.removeAll()
     picker = PathPicker()
-    paths = []
+    paths = flows.keys.sorted()
     path = nil
     rtt = nil
   }

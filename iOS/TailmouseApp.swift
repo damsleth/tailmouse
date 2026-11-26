@@ -115,6 +115,7 @@ struct SettingsScreen: View {
           LabeledContent("Mac", value: client.macName ?? "–")
           LabeledContent("Status", value: client.status)
           LabeledContent("Paths", value: client.paths.isEmpty ? "–" : client.paths.joined(separator: ", "))
+          LabeledContent("Bluetooth", value: client.bleState)
           Button("Reconnect") { client.reconnect() }
         }
         Section {

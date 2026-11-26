@@ -4,17 +4,20 @@
 
 # tailmouse
 
-Use your iPhone as a trackpad and keyboard for your Mac. It connects over the local network, over Apple's peer-to-peer Wi-Fi (AWDL, the link AirDrop uses) or over Tailscale, whichever is fastest. That means it still works on Wi-Fi networks that isolate clients. Both ends are native Swift.
+Use your iPhone as a trackpad and keyboard for your Mac. It connects over a USB cable, the local network, Tailscale, Bluetooth or Apple's peer-to-peer Wi-Fi (AWDL, the link AirDrop uses). That means it still works on Wi-Fi networks that isolate clients. Both ends are native Swift.
 
 Status: early. v1 covers the trackpad and keyboard.
 
 ## How it works
 
 - The Mac runs a menu bar app that listens on one UDP port (47474 by default) and advertises itself with Bonjour.
-- The iPhone opens a flow on every route it can find: the USB cable, the local network, AWDL and each tailnet address of the Mac. It probes all of them once a second and sends on the cable when it is plugged in, otherwise on the fastest one that answers.
+- The iPhone opens a flow on every route it can find: the USB cable, the local network, Bluetooth and each tailnet address of the Mac, and AWDL when none of those answers. It probes all of them once a second and sends on the cable when it is plugged in, otherwise on the fastest one that answers.
+- Packets are a compact binary layout, 77 bytes for a pointer movement, so the slow Bluetooth link keeps up. The phone and the Mac must run the same build.
 - Pointer movement travels as running totals, so a lost packet costs nothing. Clicks and keys are numbered and resent until the Mac acknowledges them, and run once, in order.
 - Two-finger scrolls keep gliding after you lift your fingers, like a Mac trackpad. The Mac does the glide, so it costs no extra traffic.
 - The Mac app has a window (menu bar › Open Tailmouse…) with the device list, scroll momentum, the port, which routes to allow, an optional PIN, and Launch at Login.
+
+Routes in detail, what to expect from Bluetooth, and what to do when the pointer stutters about once a second on Wi-Fi: [DOCUMENTATION.md](DOCUMENTATION.md).
 
 ## Security
 
@@ -34,7 +37,7 @@ make install-mac  # or: copy it to /Applications, so Launch at Login works
 make ipa          # unsigned build/Tailmouse.ipa, for SideStore
 ```
 
-On first launch, grant Accessibility (the menu offers it) and allow incoming connections. To put the iPhone app on your phone, either run the `Tailmouse` scheme from Xcode with your phone selected, or install `build/Tailmouse.ipa` with [SideStore](https://sidestore.io).
+On first launch, grant Accessibility (the menu offers it), allow incoming connections and, for the Bluetooth route, allow Bluetooth. To put the iPhone app on your phone, either run the `Tailmouse` scheme from Xcode with your phone selected, or install `build/Tailmouse.ipa` with [SideStore](https://sidestore.io).
 
 ## Credits
 

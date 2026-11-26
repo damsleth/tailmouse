@@ -36,10 +36,13 @@ final class Server {
 
   private let queue = DispatchQueue(label: "tailmouse.server", qos: .userInteractive)
   private let name: String
+  private var key: Data
   private var seal: Seal
   private var sessions: Sessions
   private var config: ServerConfig
   private var devices: [String: DeviceRecord]
+  /// The device id each `Packet.client` last named.
+  private var deviceOf: [UInt64: String] = [:]
   private let input: Input
   private var listener: NWListener?
   /// Every source address and port gets a flow before anything is known about
@@ -48,6 +51,7 @@ final class Server {
   private static let maxConnections = 32
   private static let maxDevices = 50
   private var timer: DispatchSourceTimer?
+  private lazy var ble = BLEPeripheral(queue: queue)
   /// A menu bar app with no window is an App Nap candidate; napping delays
   /// the queue. Idle system sleep stays allowed.
   private let activity = ProcessInfo.processInfo.beginActivity(
@@ -58,7 +62,9 @@ final class Server {
   /// `defaults write <bundle id> jitterLog -bool YES`, read with
   /// `log stream --predicate 'subsystem == "tailmouse"'`.
   private struct Jitter {
-    var n = 0, sendGap = 0.0, arriveGap = 0.0, late = 0.0
+    /// `bursts` counts arrivals more than 5 ms apart: on Bluetooth, the
+    /// connection events per second.
+    var n = 0, bursts = 0, bytes = 0, sendGap = 0.0, arriveGap = 0.0, late = 0.0
     var lastSent = 0.0, lastArrived = 0.0, minDelay = Double.infinity
   }
   private var jitter: [Route: Jitter] = [:]
@@ -67,6 +73,7 @@ final class Server {
 
   init(key: Data, name: String, devices: [DeviceRecord], config: ServerConfig) {
     self.name = name
+    self.key = key
     self.seal = Seal(keyData: key)!
     self.sessions = Sessions(name: name)
     self.sessions.pin = config.pin
@@ -77,7 +84,11 @@ final class Server {
   }
 
   func start() {
-    queue.async { self.listen() }
+    queue.async { [self] in
+      self.listen()
+      self.ble.onDatagram = { [weak self] data, reply in self?.receive(data, route: .ble, reply: reply) ?? false }
+      self.advertiseBLE()
+    }
     let t = DispatchSource.makeTimerSource(queue: queue)
     t.schedule(deadline: .now() + 1, repeating: 1)
     t.setEventHandler { [weak self] in self?.housekeeping() }
@@ -88,7 +99,9 @@ final class Server {
   /// New key: every paired phone has to scan again.
   func rekey(_ key: Data) {
     queue.async {
+      self.key = key
       self.seal = Seal(keyData: key)!
+      self.advertiseBLE()
       self.sessions = Sessions(name: self.name)
       self.sessions.pin = self.config.pin
       self.input.releaseAll()
@@ -101,6 +114,7 @@ final class Server {
       self.config = new
       self.sessions.pin = new.pin
       self.input.momentum.tau = new.momentum
+      self.advertiseBLE()
       // includePeerToPeer and the port are fixed per listener.
       if old.port != new.port || old.routes.contains(.awdl) != new.routes.contains(.awdl) {
         self.restart()
@@ -111,6 +125,9 @@ final class Server {
   func forget(device id: String) {
     queue.async { self.devices[id] = nil }
   }
+
+  /// The service follows the key; a switched-off route advertises nothing.
+  private func advertiseBLE() { ble.set(key: config.routes.contains(.ble) ? key : nil) }
 
   private func restart() {
     listener?.cancel()
@@ -180,29 +197,40 @@ final class Server {
     guard let entry = connections[id], config.routes.contains(entry.route) else { return }
     // Unauthenticated or tampered: drop without a word, and drop the flow too
     // unless it has carried a good packet before.
-    guard let packet = seal.open(Packet.self, from: data) else {
+    guard receive(data, route: entry.route, reply: { c.send(content: $0, completion: .idempotent) }) else {
       if !entry.authed { c.cancel(); connections[id] = nil }
       return
     }
     connections[id]?.lastSeen = now()
     connections[id]?.authed = true
-    if jitterLog { note(packet, route: entry.route) }
+  }
+
+  /// One datagram, whatever carried it. False when it does not open: no reply,
+  /// and the caller drops a flow that has never sent a good one.
+  private func receive(_ data: Data, route: Route, reply send: (Data) -> Void) -> Bool {
+    guard let packet = seal.open(Packet.self, from: data) else { return false }
+    if jitterLog { note(packet, route: route, bytes: data.count) }
     let (reply, actions) = sessions.receive(packet, now: now())
     actions.forEach(input.perform)
-    if let out = try? seal.seal(reply) {
-      c.send(content: out, completion: .idempotent)
-    }
+    if let out = try? seal.seal(reply) { send(out) }
     if packet.session != 0, packet.session == reply.session {
-      let key = packet.device?.uuidString ?? "client-\(packet.client)"
-      devices[key] = DeviceRecord(id: key, name: String((packet.name ?? "iPhone").prefix(64)),
+      // Pointer packets leave the identity out; the probe brings it once a second.
+      if let d = packet.device {
+        if deviceOf.count > 256 { deviceOf.removeAll() }   // one entry per phone app launch
+        deviceOf[packet.client] = d.uuidString
+        devices["client-\(packet.client)"] = nil            // listed before its first probe
+      }
+      let key = deviceOf[packet.client] ?? "client-\(packet.client)"
+      devices[key] = DeviceRecord(id: key, name: String((packet.name ?? devices[key]?.name ?? "iPhone").prefix(64)),
                                   via: String((packet.via ?? devices[key]?.via ?? "").prefix(16)), lastSeen: Date())
       if devices.count > Self.maxDevices, let oldest = devices.values.min(by: { $0.lastSeen < $1.lastSeen }) {
         devices[oldest.id] = nil
       }
     }
+    return true
   }
 
-  private func note(_ p: Packet, route: Route) {
+  private func note(_ p: Packet, route: Route, bytes: Int) {
     let t = now()
     var j = jitter[route] ?? Jitter()
     // A gap over 0.25 s is a lifted finger (the 1 s probe), not a stall.
@@ -214,6 +242,8 @@ final class Server {
     j.minDelay = min(j.minDelay, t - p.time)
     j.late = max(j.late, t - p.time - j.minDelay)
     j.n += 1
+    if arrived > 0.005 { j.bursts += 1 }
+    j.bytes = j.bytes == 0 ? bytes : min(j.bytes, bytes)   // the pointer packet, not the probe
     j.lastSent = max(j.lastSent, p.time)
     j.lastArrived = t
     jitter[route] = j
@@ -222,10 +252,11 @@ final class Server {
   private func housekeeping() {
     let t = now()
     for (route, j) in jitter where j.n > 5 {
-      log.notice("\(route.rawValue, privacy: .public) n=\(j.n) sendGap=\(j.sendGap * 1000, format: .fixed(precision: 1)) arriveGap=\(j.arriveGap * 1000, format: .fixed(precision: 1)) late=\(j.late * 1000, format: .fixed(precision: 1)) ms")
+      log.notice("\(route.rawValue, privacy: .public) n=\(j.n) bursts=\(j.bursts) bytes=\(j.bytes) sendGap=\(j.sendGap * 1000, format: .fixed(precision: 1)) arriveGap=\(j.arriveGap * 1000, format: .fixed(precision: 1)) late=\(j.late * 1000, format: .fixed(precision: 1)) ms")
     }
-    for route in jitter.keys { (jitter[route]!.n, jitter[route]!.sendGap, jitter[route]!.arriveGap, jitter[route]!.late) = (0, 0, 0, 0) }
+    for route in jitter.keys { (jitter[route]!.n, jitter[route]!.bursts, jitter[route]!.bytes, jitter[route]!.sendGap, jitter[route]!.arriveGap, jitter[route]!.late) = (0, 0, 0, 0, 0, 0) }
     if sessions.expire(now: t) { input.releaseAll() }
+    ble.sweep(now: t)
     for (id, entry) in connections where t - entry.lastSeen > (entry.authed ? 30 : 3) {
       entry.conn.cancel()
       connections[id] = nil

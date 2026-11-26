@@ -173,13 +173,38 @@ struct SplitMix: RandomNumberGenerator {
 
 // MARK: - Compatibility, PIN, routes
 
-@Test func packetFromAPhoneWithoutNewFieldsStillOpens() throws {
-  let key = Seal.newKey()
-  // What a v1 phone build sends: no device, name, via or pin.
-  let json = Data(#"{"client":1,"session":0,"time":2,"events":[]}"#.utf8)
-  let box = try ChaChaPoly.seal(json, using: key, authenticating: Seal.header)
-  let p = Seal(key: key).open(Packet.self, from: Seal.header + box.combined)
-  #expect(p == Packet(client: 1, session: 0, time: 2))
+@Test func everyFieldSurvivesTheWire() {
+  let events: [Event] = [.click(.left), .click(.right), .dragBegin, .dragEnd, .scrollBegin, .scrollEnd,
+                         .text("blåbær 🫐"), .key(.pageDown, [.command, .shift]), .char("é", .option)]
+  let p = Packet(client: .max, session: 7, time: 12.5,
+                 motion: Motion(kind: .scroll, gesture: 9, x: -1.25, y: 3e6),
+                 events: events.enumerated().map { Sequenced(seq: UInt32($0.offset), time: 1.5, event: $0.element) },
+                 device: UUID(), name: "Example iPhone", via: "BLE", pin: "0000")
+  #expect(Packet(wire: p.wire) == p)
+  let r = Reply(session: 7, ack: 3, echo: 12.5, name: "Example Mac", pin: .wrong)
+  #expect(Reply(wire: r.wire) == r)
+  #expect(Reply(wire: Reply(session: 0, ack: 0, echo: 0, name: "").wire)?.pin == nil)
+}
+
+@Test func pointerPacketIsSmallAndTrailingBytesAreIgnored() {
+  let p = Packet(client: 1, session: 2, time: 3, motion: Motion(kind: .pointer, gesture: 4, x: 5, y: 6))
+  #expect(p.wire.count == 46)
+  // A newer build appends fields; this one reads what it knows.
+  #expect(Packet(wire: p.wire + Data([1, 2, 3])) == p)
+}
+
+@Test func malformedWireIsRefused() {
+  let p = Packet(client: 1, session: 2, time: 3, motion: Motion(kind: .pointer, gesture: 4, x: 5, y: 6),
+                 events: [Sequenced(seq: 1, time: 0, event: .text("hi"))], name: "n")
+  let wire = p.wire
+  for cut in 0..<wire.count { #expect(Packet(wire: wire.prefix(cut)) == nil) }
+  var nan = wire
+  nan.replaceSubrange(17..<25, with: [0x7F, 0xF8, 0, 0, 0, 0, 0, 0])     // time = NaN
+  #expect(Packet(wire: nan) == nil)
+  var tag = Packet(client: 1, session: 2, time: 3, events: [Sequenced(seq: 1, time: 0, event: .dragBegin)]).wire
+  tag[tag.count - 1] = 200                                               // an event this build doesn't know
+  #expect(Packet(wire: tag) == nil)
+  #expect(Reply(wire: Data([9]) + Reply(session: 0, ack: 0, echo: 0, name: "").wire.dropFirst()) == nil)
 }
 
 @Test func wrongPinStartsNoSessionAndRunsNothing() {
@@ -285,4 +310,45 @@ struct SplitMix: RandomNumberGenerator {
 @Test func pairingLinkKeepsOnlyTailnetHosts() {
   let p = Pairing(key: Seal.newKey().data, name: "Example Mac", hosts: ["100.64.0.1", "evil.example", "8.8.8.8", "fd7a:115c:a1e0::1", "x.tail0000.ts.net"])
   #expect(Pairing(url: p.url)?.hosts == ["100.64.0.1", "fd7a:115c:a1e0::1", "x.tail0000.ts.net"])
+}
+
+// MARK: - Bluetooth framing
+
+@Test func framesSurviveSplittingAndCoalescing() {
+  let a = Data(repeating: 1, count: 300), b = Data([2]), c = Data(repeating: 3, count: Framer.maxFrame)
+  let stream = Framer.frame(a)! + Framer.frame(b)! + Framer.frame(c)!
+  var whole = Framer()
+  #expect(whole.feed(stream) == [a, b, c])
+  var bytewise = Framer(), out: [Data] = []
+  for byte in stream { out += bytewise.feed(Data([byte]))! }
+  #expect(out == [a, b, c])
+}
+
+@Test func framerRejectsEmptyAndOversize() {
+  #expect(Framer.frame(Data()) == nil)
+  #expect(Framer.frame(Data(repeating: 0, count: Framer.maxFrame + 1)) == nil)
+  var zero = Framer()
+  #expect(zero.feed(Data([0, 0])) == nil)
+  var huge = Framer()
+  #expect(huge.feed(Data([0xFF, 0xFF, 1])) == nil)     // refused on the length, before the body arrives
+}
+
+@Test func sendWindowWaitsForAnswersAndReopens() {
+  var w = SendWindow(size: 2)
+  #expect(w.wait(now: 0) <= 0); w.sent(now: 0)
+  #expect(w.wait(now: 0.01) <= 0); w.sent(now: 0.01)
+  #expect(w.wait(now: 0.02) > 0)                       // two unanswered: hold
+  w.answered()
+  #expect(w.wait(now: 0.03) <= 0); w.sent(now: 0.03)
+  #expect(w.wait(now: 0.04) > 0)
+  #expect(w.wait(now: 0.03 + SendWindow.timeout) <= 0) // no answer: start over
+  w.answered(); w.answered(); w.answered()             // extra answers don't widen it
+  w.sent(now: 1); w.sent(now: 1)
+  #expect(w.wait(now: 1.01) > 0)
+}
+
+@Test func bleServiceFollowsTheKey() {
+  let a = Data(repeating: 1, count: 32), b = Data(repeating: 2, count: 32)
+  #expect(Wire.bleService(key: a) == Wire.bleService(key: a))
+  #expect(Wire.bleService(key: a) != Wire.bleService(key: b))
 }
