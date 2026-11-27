@@ -30,14 +30,21 @@ final class AppModel: ObservableObject {
   @Published var state = "Starting…"
   @Published var keychainError: String?
   @Published var trusted = AXIsProcessTrusted()
-  @Published var pairing: Pairing
+  /// The code on screen while the Pair window is open. Its `key` is a public
+  /// key made for this code; the phone that claims it gets a key of its own.
+  @Published private(set) var pairing: Pairing?
+  /// One key per paired phone, by device id; in the Keychain.
+  private var phones: [String: Data] = [:]
+  private let name = Host.current().localizedName ?? "Mac"
+  /// The Bluetooth service this Mac advertises; in every pairing code.
+  private let bleService: UUID
 
   @Published var port: Int {
     didSet {
       guard port != oldValue else { return }
       guard (1024...65535).contains(port) else { port = oldValue; return }
       defaults.set(port, forKey: "port")
-      pairing.port = UInt16(port)
+      pairing?.port = UInt16(port)
       server.apply(config)
     }
   }
@@ -50,21 +57,6 @@ final class AppModel: ObservableObject {
   @Published var momentum: Double {
     didSet {
       defaults.set(momentum, forKey: "momentum")
-      server.apply(config)
-    }
-  }
-  @Published var requirePin: Bool {
-    didSet {
-      defaults.set(requirePin, forKey: "requirePin")
-      server.apply(config)
-    }
-  }
-  @Published var pin: String {
-    didSet {
-      let clean = String(pin.filter { $0.isASCII && $0.isNumber }.prefix(4))
-      guard clean == pin else { pin = clean; return }
-      if pin.count == 4 { KeyStore.save(Data(pin.utf8), "pin") }
-      if pin.isEmpty { KeyStore.delete("pin") }
       server.apply(config)
     }
   }
@@ -82,40 +74,80 @@ final class AppModel: ObservableObject {
   @Published private(set) var airDropEveryone = Radio.airDropEveryone
 
   var awdlStutters: Bool { on6GHz && airDropEveryone }
+  /// The way out: on a 6 GHz network that isolates clients, a stuttering AWDL
+  /// link can still beat a relayed tailnet or Bluetooth.
+  @Published var awdlAnyway: Bool {
+    didSet {
+      defaults.set(awdlAnyway, forKey: "awdlOn6GHz")
+      server.apply(config)
+    }
+  }
+  /// The AWDL switch means nothing right now.
+  var awdlLocked: Bool { on6GHz && !awdlAnyway }
+
+  /// What the phone's drawing mode maps to, and where that is right now: a
+  /// window moves, so the timer below reads it again.
+  @Published var tablet: TabletTarget {
+    didSet {
+      if let data = try? JSONEncoder().encode(tablet) { defaults.set(data, forKey: "tablet") }
+      tabletRegion = tablet.region
+    }
+  }
+  @Published private(set) var tabletRegion: CGRect? {
+    didSet { if tabletRegion != oldValue { server.apply(config) } }
+  }
+  private var picker: TabletPicker?
+
+  func chooseTablet() {
+    guard picker == nil else { return }
+    picker = TabletPicker(current: tablet.region == nil ? .main : tablet) { [weak self] chosen in
+      self?.picker = nil
+      if let chosen { self?.tablet = chosen }
+    }
+    picker?.show()
+  }
 
   private let defaults = UserDefaults.standard
   private let server: Server
   private var axTimer: Timer?
 
   var config: ServerConfig {
-    ServerConfig(port: UInt16(port), routes: Self.usable(routes, on6GHz: on6GHz),
-                 pin: Self.effectivePin(requirePin, pin), momentum: momentum)
+    // A closed window or an unplugged display: the main display until it is chosen again.
+    ServerConfig(port: UInt16(port), routes: Self.usable(routes, on6GHz: awdlLocked),
+                 momentum: momentum, tablet: tabletRegion ?? TabletTarget.main.region)
   }
 
   static func usable(_ routes: Set<Route>, on6GHz: Bool) -> Set<Route> {
     on6GHz ? routes.subtracting([.awdl]) : routes
   }
 
-  /// Required but not all four digits in yet: "" lets no one in (fail closed).
-  static func effectivePin(_ required: Bool, _ pin: String) -> String? {
-    required ? (pin.count == 4 ? pin : "") : nil
-  }
-
   init() {
-    let name = Host.current().localizedName ?? "Mac"
-    let key: Data
+    let d = UserDefaults.standard
+    var keys: [String: Data] = [:]
     do {
-      key = try KeyStore.load() ?? {
+      phones = try KeyStore.load("phones").flatMap { try? JSONDecoder().decode([String: Data].self, from: $0) } ?? [:]
+      keys = phones
+      #if DEBUG
+      // `make sim` pairs the simulator with this key, without a QR scan. Kept
+      // out of `phones`, so a Release build never accepts it.
+      keys["sim"] = try KeyStore.load("sim-key") ?? {
         let k = Seal.newKey().data
-        KeyStore.save(k)
+        KeyStore.save(k, "sim-key")
         return k
       }()
+      #endif
     } catch {
-      // Don't overwrite a key we couldn't read; run unpaired until relaunch.
-      key = Seal.newKey().data
-      keychainError = "Couldn't read the pairing key from the Keychain (\(error)). Relaunch to try again."
+      // Don't overwrite keys we couldn't read; no pairing until relaunch.
+      keychainError = "Couldn't read the phones' keys from the Keychain (\(error)). Relaunch to try again."
     }
-    let d = UserDefaults.standard
+    // The key every phone shared, and the PIN: both gone.
+    KeyStore.delete("pairing-key")
+    KeyStore.delete("pin")
+    bleService = d.string(forKey: "bleService").flatMap(UUID.init) ?? {
+      let id = UUID()
+      d.set(id.uuidString, forKey: "bleService")
+      return id
+    }()
     let port = (d.object(forKey: "port") as? Int).flatMap { (1024...65535).contains($0) ? $0 : nil } ?? Int(Wire.defaultPort)
     var routes = Set((d.stringArray(forKey: "routes") ?? Route.allCases.map(\.rawValue)).compactMap(Route.init))
     // Routes added after the first release: on by default for saved settings too.
@@ -124,16 +156,23 @@ final class AppModel: ObservableObject {
       d.set(true, forKey: seen)
       d.set(routes.map(\.rawValue), forKey: "routes")
     }
-    let requirePin = d.bool(forKey: "requirePin")
     let momentum = d.object(forKey: "momentum") as? Double ?? 0.5
-    let pin = (try? KeyStore.load("pin")).flatMap { $0.flatMap { String(data: $0, encoding: .utf8) } } ?? ""
     let devices = d.data(forKey: "devices").flatMap { try? JSONDecoder().decode([DeviceRecord].self, from: $0) } ?? []
-    (self.port, self.routes, self.requirePin, self.pin, self.devices) = (port, routes, requirePin, pin, devices)
+    (self.port, self.routes, self.devices) = (port, routes, devices)
     self.momentum = momentum
-    pairing = Pairing(key: key, name: name, port: UInt16(port), hosts: tailnetAddresses())
-    server = Server(key: key, name: name, devices: devices, config: ServerConfig(
-      port: UInt16(port), routes: Self.usable(routes, on6GHz: Radio.on6GHz),
-      pin: Self.effectivePin(requirePin, pin), momentum: momentum))
+    awdlAnyway = d.bool(forKey: "awdlOn6GHz")
+    let tablet = d.data(forKey: "tablet").flatMap { try? JSONDecoder().decode(TabletTarget.self, from: $0) } ?? .main
+    self.tablet = tablet
+    tabletRegion = tablet.region
+    server = Server(keys: keys, bleService: bleService, name: name, devices: devices, config: ServerConfig(
+      port: UInt16(port), routes: Self.usable(routes, on6GHz: Radio.on6GHz && !d.bool(forKey: "awdlOn6GHz")),
+      momentum: momentum, tablet: tablet.region ?? TabletTarget.main.region))
+    server.onPaired = { [weak self] id, key in
+      guard let self else { return }
+      self.phones[id] = key
+      self.savePhones()
+      self.pairing = nil   // used up
+    }
     server.onDevices = { [weak self] list in
       guard let self else { return }
       // Assign every tick even when equal: "connected" is relative to now.
@@ -142,21 +181,19 @@ final class AppModel: ObservableObject {
       if changed, let data = try? JSONEncoder().encode(list) { self.defaults.set(data, forKey: "devices") }
     }
     server.onState = { [weak self] s in self?.state = s }
-    server.onPinLocked = { [weak self] in
-      self?.resetPairing()
-      self?.state = "5 wrong PINs: made a new key"
-    }
     server.start()
     axTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
       Task { @MainActor in
         self?.trusted = AXIsProcessTrusted()
         // Tailscale may come up after launch; keep the QR current.
         let hosts = tailnetAddresses()
-        if self?.pairing.hosts != hosts { self?.pairing.hosts = hosts }
+        if let p = self?.pairing, p.hosts != hosts { self?.pairing?.hosts = hosts }
         // The Mac roams between bands, and AirDrop is set elsewhere.
         let (six, everyone) = (Radio.on6GHz, Radio.airDropEveryone)
         if self?.on6GHz != six { self?.on6GHz = six }
         if self?.airDropEveryone != everyone { self?.airDropEveryone = everyone }
+        if let region = self?.tablet.region, self?.tabletRegion != region { self?.tabletRegion = region }
+        else if self?.tablet.region == nil, self?.tabletRegion != nil { self?.tabletRegion = nil }
       }
     }
   }
@@ -168,16 +205,31 @@ final class AppModel: ObservableObject {
     trusted = AXIsProcessTrustedWithOptions(opts)
   }
 
-  func resetPairing() {
-    let k = Seal.newKey().data
-    KeyStore.save(k)
-    pairing.key = k
-    server.rekey(k)
+  /// Shows a new code. The first phone to claim it agrees on a key with the
+  /// Mac; the Mac accepts a claim only while the Pair window is open.
+  func beginPairing() {
+    guard keychainError == nil else { return }
+    let key = Seal.PairingKey()
+    pairing = Pairing(key: key.publicKey.rawRepresentation, ble: bleService, name: name, port: UInt16(port), hosts: tailnetAddresses())
+    server.offer((id: UUID().uuidString, key: key))
   }
 
+  func endPairing() {
+    pairing = nil
+    server.offer(nil)
+  }
+
+  private func savePhones() {
+    guard keychainError == nil, let data = try? JSONEncoder().encode(phones) else { return }
+    KeyStore.save(data, "phones")
+  }
+
+  /// Deletes the phone's key. It has to pair again to come back.
   func forget(_ id: String) {
     devices.removeAll { $0.id == id }
-    server.forget(device: id)
+    phones[id] = nil
+    savePhones()
+    server.remove(phone: id)
     if let data = try? JSONEncoder().encode(devices) { UserDefaults.standard.set(data, forKey: "devices") }
   }
 
@@ -190,14 +242,13 @@ final class AppModel: ObservableObject {
   }
 
   func route(_ r: Route) -> Binding<Bool> {
-    Binding(get: { self.routes.contains(r) && !(r == .awdl && self.on6GHz) },
+    Binding(get: { self.routes.contains(r) && !(r == .awdl && self.awdlLocked) },
             set: { on in if on { self.routes.insert(r) } else { self.routes.remove(r) } })
   }
 }
 
 struct MenuContent: View {
   @ObservedObject var model: AppModel
-  @Environment(\.openWindow) private var openWindow
   @Environment(\.openSettings) private var openSettings
 
   var body: some View {
@@ -218,10 +269,7 @@ struct MenuContent: View {
       NSApp.activate()
     }
     .keyboardShortcut(",")
-    Button("Pair iPhone…") {
-      openWindow(id: "pair")
-      NSApp.activate()
-    }
+    Button("Drawing Area…") { model.chooseTablet() }
     Divider()
     Button("Quit Tailmouse") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
   }
@@ -259,17 +307,19 @@ struct DevicesTab: View {
         TableColumn("Connection") { d in Text(d.via.isEmpty ? "–" : d.via) }
           .width(100)
         TableColumn("Last active") { d in
-          Text(d.isConnected ? "Now" : d.lastSeen.formatted(.relative(presentation: .named)))
+          Text(d.isConnected ? "Now" : d.lastSeen == .distantPast ? "Never" : d.lastSeen.formatted(.relative(presentation: .named)))
         }
         .width(140)
       }
       .contextMenu(forSelectionType: String.self) { ids in
-        Button("Remove from List") { ids.forEach(model.forget) }
+        Button("Remove") { ids.forEach(model.forget) }
       }
       HStack(alignment: .top) {
-        Text("Removing a phone only clears it from this list. To lock a phone out, make a new key in Pair iPhone.")
+        Text("Each iPhone has its own key. Removing one deletes its key: it has to pair again to come back.")
           .font(.caption).foregroundStyle(.secondary)
         Spacer()
+        Button("Remove") { selection.forEach(model.forget); selection = [] }
+          .disabled(selection.isEmpty)
         Button("Pair iPhone…") { openWindow(id: "pair") }
       }
     }
@@ -325,11 +375,23 @@ struct SettingsTab: View {
             Toggle(isOn: model.route(r)) {
               VStack(alignment: .leading, spacing: 2) {
                 Text(r.title)
-                note(r == .awdl && model.on6GHz ? Route.awdlOn6GHz : r.detail)
+                note(r == .awdl && model.awdlLocked ? Route.awdlOn6GHz : r.detail)
               }
             }
             .accessibilityLabel(r.title)
-            .disabled(r == .awdl && model.on6GHz)
+            .disabled(r == .awdl && model.awdlLocked)
+            if r == .awdl && model.on6GHz {
+              VStack(alignment: .leading, spacing: 4) {
+                Toggle("Allow it on 6 GHz networks anyway", isOn: $model.awdlAnyway)
+                  .accessibilityLabel("Allow AWDL on 6 GHz networks anyway")
+                if model.awdlAnyway && model.routes.contains(.awdl) {
+                  Label("The pointer stops about twice a second on every Wi-Fi route while this is on. For networks that block devices from each other, where AWDL is the only Wi-Fi route that gets through.",
+                        systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+              }
+              .padding(.leading, 20)
+            }
           }
           if model.awdlStutters {
             Label {
@@ -346,24 +408,6 @@ struct SettingsTab: View {
             .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
           }
           note("The iPhone uses the cable when it is plugged in, otherwise the fastest route that answers, and switches when one stops.")
-        }
-      }
-      .padding(.top, 12)
-      LabeledContent("Security:") {
-        VStack(alignment: .leading, spacing: 6) {
-          Toggle("Require a PIN to connect", isOn: $model.requirePin)
-            .accessibilityLabel("Require a PIN to connect")
-          if model.requirePin {
-            TextField("4 digits", text: $model.pin)
-              .labelsHidden()
-              .accessibilityLabel("PIN")
-              .frame(width: 80)
-          }
-          if model.requirePin && model.pin.count < 4 {
-            Text("Enter 4 digits. Until then no iPhone can connect.")
-              .font(.caption).foregroundStyle(.orange)
-          }
-          note("Asked for on the iPhone, in addition to the pairing code. 5 different wrong PINs make a new key, and every iPhone has to scan again.")
         }
       }
       .padding(.top, 12)
@@ -388,7 +432,7 @@ extension Route {
     }
   }
 
-  static let awdlOn6GHz = "Off while this Mac is on a 6 GHz Wi-Fi network. AWDL works on 2.4 and 5 GHz only, so the Wi-Fi radio would leave the network about twice a second and every Wi-Fi route would stutter. It comes back on a 2.4 or 5 GHz network."
+  static let awdlOn6GHz = "Off while this Mac is on a 6 GHz Wi-Fi network. AWDL works on 2.4 and 5 GHz only, so the Wi-Fi radio would leave the network about twice a second and every Wi-Fi route would stutter. It comes back on a 2.4 or 5 GHz network, or with the switch below."
 
   var detail: String {
     switch self {
@@ -434,40 +478,45 @@ struct AboutTab: View {
 
 struct PairView: View {
   @ObservedObject var model: AppModel
+  @Environment(\.dismiss) private var dismiss
 
   var body: some View {
     VStack(spacing: 14) {
-      if let img = qrImage(for: model.pairing.url.absoluteString) {
-        Image(decorative: img, scale: 2)
-          .interpolation(.none)
-          .padding(10)
-          .background(.white, in: RoundedRectangle(cornerRadius: 12))
-      }
-      Text("Scan with the iPhone Camera, then tap “Open in Tailmouse”.")
-        .font(.callout)
-        .multilineTextAlignment(.center)
-        .fixedSize(horizontal: false, vertical: true)
-      Label {
-        Text("This code is the key to your Mac. Anyone who scans it or gets the link can control your mouse and keyboard until you press New Key. Keep it off shared screens.")
+      if let pairing = model.pairing {
+        if let img = qrImage(for: pairing.url.absoluteString) {
+          Image(decorative: img, scale: 2)
+            .interpolation(.none)
+            .padding(10)
+            .background(.white, in: RoundedRectangle(cornerRadius: 12))
+        }
+        Text("In Tailmouse on the iPhone, tap “Scan QR code”.")
+          .font(.callout)
+          .multilineTextAlignment(.center)
           .fixedSize(horizontal: false, vertical: true)
-      } icon: {
-        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-      }
-      .font(.caption)
-      .padding(10)
-      .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-      Text(model.pairing.hosts.isEmpty
-           ? "Tailscale is not running on this Mac: LAN and AWDL only."
-           : "Tailnet: \(model.pairing.hosts.joined(separator: ", "))")
-        .font(.caption).foregroundStyle(.secondary)
-      HStack {
-        Button("Copy Link") { copySecret(model.pairing.url.absoluteString) }
-        Button("New Key", role: .destructive) { model.resetPairing() }
-          .help("Unpairs every iPhone. They have to scan again.")
+        Label {
+          Text("This code pairs one iPhone: the first to scan it, which can then control your mouse and keyboard. This window closes when a phone has paired. If your iPhone does not connect then, another phone got there first: remove it under Devices. An unused code stops working when this window closes.")
+            .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+          Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        }
+        .font(.caption)
+        .padding(10)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        Text(pairing.hosts.isEmpty
+             ? "Tailscale is not running on this Mac: LAN and AWDL only."
+             : "Tailnet: \(pairing.hosts.joined(separator: ", "))")
+          .font(.caption).foregroundStyle(.secondary)
+        Button("Copy Link") { copySecret(pairing.url.absoluteString) }
+      } else if let e = model.keychainError {
+        Text(e).fixedSize(horizontal: false, vertical: true)
       }
     }
     .padding(24)
     .frame(width: 340)
+    .onAppear { model.beginPairing() }
+    // The code is spent once a phone has paired: the Devices list shows it.
+    .onChange(of: model.pairing == nil) { _, used in if used { dismiss() } }
+    .onDisappear { model.endPairing() }
   }
 }
 

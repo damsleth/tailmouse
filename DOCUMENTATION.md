@@ -1,6 +1,6 @@
 # Tailmouse documentation
 
-The [README](README.md) tells you what Tailmouse is and how to build it. This document describes the routes and tells you what to expect from the Bluetooth route, and tells you how to find the cause of a pointer that stutters.
+The [README](README.md) tells you what Tailmouse is and how to build it. This document describes the routes, the modes of the iPhone app, how to pair and remove an iPhone, tells you what to expect from the Bluetooth route, and tells you how to find the cause of a pointer that stutters.
 
 ## Routes
 
@@ -29,7 +29,8 @@ The round trip does not show short pauses. A route with a low round trip can sti
 
 - On the Mac, open **Settings › Routes**. Each route has a switch. The Mac does not answer on a route that is off.
 - On the iPhone, **Settings › Use AWDL** permits or prevents the AWDL route.
-- When the Mac is on a 6 GHz Wi-Fi network, the Mac sets the AWDL route to off and you cannot change the switch. Your selection comes back when the Mac joins a 2.4 GHz or 5 GHz network. Refer to [The pointer stutters about once a second](#the-pointer-stutters-about-once-a-second).
+- When the Mac is on a 6 GHz Wi-Fi network, the Mac sets the AWDL route to off and you cannot change the switch. Your selection comes back when the Mac joins a 2.4 GHz or 5 GHz network.
+- To use the AWDL route on a 6 GHz network, set **Allow it on 6 GHz networks anyway** to on. Do this only on a network that blocks devices from each other, where AWDL is the only Wi-Fi route. The pointer then stops approximately two times each second on all Wi-Fi routes. Refer to [The pointer stutters about once a second](#the-pointer-stutters-about-once-a-second).
 - On the iPhone, **Settings › Paths** shows the routes that are open. The **Bluetooth** line shows the state of the Bluetooth route.
 
 To use the Bluetooth route, set the Local network, AWDL and Tailnet switches on the Mac to off.
@@ -39,6 +40,78 @@ To use the Bluetooth route, set the Local network, AWDL and Tailnet switches on 
 - The Mac app asks for Bluetooth access when the Bluetooth route is on.
 - The iPhone app asks for Bluetooth access after you pair it.
 - If you refuse, the other routes continue to work.
+
+## Modes
+
+On the iPhone, **Settings › Mode** sets what the touch surface is.
+
+| Mode | The surface |
+|---|---|
+| Trackpad | A trackpad, with the iPhone upright |
+| Trackpad, landscape | A trackpad, with the iPhone on its side. The surface is wide, like the trackpad of a Mac |
+| Drawing tablet | A drawing area of the Mac screen, with the iPhone on its side. Refer to [Drawing mode](#drawing-mode) |
+
+The app does not turn when you turn the iPhone. The mode sets the direction.
+
+## Drawing mode
+
+In drawing mode, the surface of the iPhone is an area of the Mac screen. A touch puts the pointer at the same position in that area and holds the mouse button down. Thus a finger that moves makes a line in a drawing app.
+
+### How to select the drawing area on the Mac
+
+1. Open the Tailmouse menu in the menu bar and select **Drawing Area…**.
+2. Select a mode in the bar at the bottom of the screen.
+
+   | Mode | What to do |
+   |---|---|
+   | Entire Screen | Click a screen |
+   | Window | Click a window |
+   | Portion | Drag inside the rectangle to move it. Drag a side or a corner to change its size. Drag outside the rectangle to make a new one |
+
+3. Push **Done** or the Return key. **Cancel** or the Esc key keeps the area that you had.
+
+- When the area is a window, the area follows the window. The Mac reads the position of the window again each 2 seconds.
+- If the window closes or the screen disconnects, the area is the main screen until you select a new one.
+
+### How to draw on the iPhone
+
+1. Set **Settings › Mode** to **Drawing tablet**.
+2. The surface gets the same shape as the drawing area. This keeps a circle round.
+3. Touch the surface and move your finger. Lift your finger to stop the line.
+4. Set the mode to a trackpad mode to go back.
+
+Limits:
+
+- Only the first finger draws. There is no pressure: the iPhone does not measure it.
+- You cannot move the pointer without a line. Go back to a trackpad mode to do that.
+- On the Bluetooth route, the line gets approximately 30 points each second.
+
+## How to pair and remove an iPhone
+
+Each iPhone has its own key. The pairing code does not contain the key. The code holds a public key of the Mac, and the iPhone and the Mac calculate the key together (X25519). A copy of the code does not give the key.
+
+### How to pair an iPhone
+
+1. On the Mac, open **Open Tailmouse… › Devices** and push **Pair iPhone…**.
+2. In Tailmouse on the iPhone, tap **Scan QR code**, allow the camera and point it at the code. The Camera app works too: scan the code and tap **Open in Tailmouse**.
+3. The window closes when the iPhone has paired. Make sure that the iPhone is in the Devices list.
+
+- One code pairs one iPhone. For a second iPhone, push **Pair iPhone…** again.
+- A code that no iPhone used stops when you close the window.
+- Keep the code off shared screens. The first iPhone that scans the code gets paired. If the window closes and your iPhone does not connect, a different iPhone used the code: remove it from the list and pair your iPhone again.
+- An iPhone that you paired with an older version must pair again.
+- If you pair an iPhone that is in the list already, it keeps its row and gets a new key. Its old key stops. If you deleted and installed the app again, the Mac sees a new iPhone: remove the old row.
+
+### How to remove an iPhone
+
+1. On the Mac, open **Open Tailmouse… › Devices**.
+2. Select the iPhone and push **Remove**.
+
+The Mac deletes the key of that iPhone. The Mac then gives no answer to it, and the iPhone shows `searching...`. The other iPhones stay paired. To use the removed iPhone again, pair it again.
+
+### The names in the device list
+
+iOS does not tell an app the name of the iPhone. The Mac finds the name from the address of the iPhone: the name of the iPhone in Tailscale, or its `.local` name on the local network. If the Mac finds no name, the list shows `iPhone`.
 
 ## The Bluetooth route
 
@@ -60,7 +133,7 @@ The same test on a Local network route without AWDL pauses gives a longest delay
 
 ## Versions
 
-The iPhone app and the Mac app must use the same wire version. The current version is 2. An app with a different version gets no answer, and the iPhone shows `searching...`. Install the two apps from the same build.
+The iPhone app and the Mac app must use the same wire version. The current version is 3. An app with a different version gets no answer, and the iPhone shows `searching...`. Install the two apps from the same build.
 
 ## The pointer stutters about once a second
 

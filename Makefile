@@ -1,7 +1,7 @@
 DERIVED := build
 IPA := $(DERIVED)/Tailmouse.ipa
 
-.PHONY: gen test mac run-mac install-mac ios-sim sim ipa clean
+.PHONY: gen test mac run-mac install-mac ios-sim sim ipa release clean
 
 gen:
 	xcodegen generate --quiet
@@ -50,6 +50,10 @@ ipa: gen
 	cp -R $(DERIVED)/Build/Products/Release-iphoneos/Tailmouse.app $(DERIVED)/ipa/Payload/
 	cd $(DERIVED)/ipa && zip -qry ../Tailmouse.ipa Payload
 	@echo "$(IPA)"
+
+# Developer ID signed, notarized zip of the Mac app. Setup: top of the script.
+release:
+	scripts/release.sh
 
 clean:
 	rm -rf $(DERIVED) Tailmouse.xcodeproj

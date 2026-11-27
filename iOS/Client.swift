@@ -19,13 +19,10 @@ final class Client: ObservableObject {
   @Published private(set) var paths: [String] = []
   /// What the Bluetooth route is doing, for Settings.
   @Published private(set) var bleState = "off"
-  /// The Mac wants a PIN before it starts a session.
-  @Published private(set) var needsPin = false
-  @Published private(set) var pinWasWrong = false
+  /// Width over height of the Mac's drawing area.
+  @Published private(set) var aspect = 1.6
 
   var interpreter = TouchInterpreter()
-  /// Shown in the Mac's device list. Set from Settings.
-  var deviceName = UIDevice.current.name
   /// Whether AWDL may be used at all. Even then it is a last resort (`awdlUp`).
   var useAWDL = UserDefaults.standard.object(forKey: "awdl") as? Bool ?? true
   /// AWDL is browsed and connected only after nothing else answered. Merely
@@ -35,13 +32,6 @@ final class Client: ObservableObject {
 
   /// New per launch, so the Mac starts a fresh session (see `Packet.client`).
   private let clientID = UInt64.random(in: 1...UInt64.max)
-  /// Stable per install, so the Mac lists this phone once across launches.
-  private let deviceID: UUID = {
-    if let s = UserDefaults.standard.string(forKey: "deviceID"), let id = UUID(uuidString: s) { return id }
-    let id = UUID()
-    UserDefaults.standard.set(id.uuidString, forKey: "deviceID")
-    return id
-  }()
   private var seal: Seal?
   private var session: UInt64 = 0
   private var outbox = Outbox()
@@ -96,7 +86,6 @@ final class Client: ObservableObject {
 
   var status: String {
     guard pairing != nil else { return "not paired" }
-    if needsPin { return "PIN needed" }
     guard let path else { return "searching…" }
     let ms = rtt.map { String(format: "%.0f ms", $0 * 1000) } ?? ""
     // "LAN 2" is a second LAN flow; the number only matters in Settings.
@@ -117,17 +106,12 @@ final class Client: ObservableObject {
   }
 
   func confirmPairing() {
-    guard let p = pendingPairing else { return }
+    // The code holds the Mac's public key; this makes the key only this
+    // phone and the Mac can work out.
+    guard let p = pendingPairing?.claimed(with: PairingStore.identity) else { return }
     pendingPairing = nil
     PairingStore.save(p)
     use(p)
-  }
-
-  func enter(pin: String) {
-    pairing?.pin = pin
-    PairingStore.save(pairing)
-    pinWasWrong = false
-    send(to: Array(flows.values))
   }
 
   func forget() {
@@ -146,10 +130,8 @@ final class Client: ObservableObject {
     outbox = Outbox()
     motion = nil
     newestEcho = -.infinity
-    needsPin = false
-    pinWasWrong = false
     macName = p.name
-    ble.start(key: p.key)
+    ble.start(service: p.ble)
     reconnect()
   }
 
@@ -161,6 +143,25 @@ final class Client: ObservableObject {
 
   func tick(time: Double) {
     handle(interpreter.tick(time: time))
+  }
+
+  // Drawing mode: the finger's place on the surface (0…1) is the cursor's
+  // place in the Mac's drawing area, and a finger down is the button down.
+  private var stroke: UInt32 = 0
+  private var stroking = false
+
+  func draw(x: Double, y: Double) {
+    if !stroking { stroke &+= 1 }
+    motion = Motion(kind: .tablet, gesture: stroke, x: min(max(x, 0), 1), y: min(max(y, 0), 1))
+    // The Mac applies the position before the press, so the stroke starts here.
+    if !stroking { stroking = true; outbox.push(.dragBegin, time: now()) }
+    send(to: hotFlows(), identity: false)
+  }
+
+  func endStroke() {
+    guard stroking else { return }
+    stroking = false
+    send(.dragEnd)
   }
 
   func send(_ event: Event) {
@@ -281,6 +282,11 @@ final class Client: ObservableObject {
     guard let reply = seal?.open(Reply.self, from: data),
           reply.echo >= newestEchoOnPath[label] ?? -.infinity, reply.echo <= now() else { return }
     newestEchoOnPath[label] = reply.echo
+    // The Mac has this phone's key now; no need to say who is asking any more.
+    if pairing?.claim != nil {
+      pairing?.claim = nil
+      PairingStore.save(pairing)
+    }
     let t = now()
     lastReply = t
     picker.replied(path: label, rtt: t - reply.echo, now: t)
@@ -296,16 +302,11 @@ final class Client: ObservableObject {
     if reply.session != session {
       session = reply.session
       outbox.restart()
+      motion = nil   // a total or a drawing position from the old session would jump the cursor
     }
     outbox.ack(reply.ack)
-    if needsPin != (reply.pin != nil) { needsPin = reply.pin != nil }
-    if reply.pin == .wrong, pairing?.pin != nil {
-      // Stop sending it: the Mac counts each distinct wrong PIN.
-      pinWasWrong = true
-      pairing?.pin = nil
-      PairingStore.save(pairing)
-    }
     if macName != reply.name { macName = reply.name }
+    if let a = reply.aspect, a > 0.05, a < 20, a != aspect { aspect = a }
   }
 
   private func probe() {
@@ -325,7 +326,7 @@ final class Client: ObservableObject {
     return Array(flows.values)
   }
 
-  /// `identity` (device, name, path) rides on hellos and the 1 s probe only:
+  /// `identity` (name, path) rides on hellos and the 1 s probe only:
   /// it is half of a pointer packet, and Bluetooth carries few bytes.
   private func send(to targets: [Flow], identity: Bool = true) {
     guard let seal, !targets.isEmpty else { return }
@@ -333,9 +334,11 @@ final class Client: ObservableObject {
     let live = session != 0
     let p = Packet(client: clientID, session: session, time: now(),
                    motion: live ? motion : nil, events: live ? outbox.pending : [],
-                   device: identity ? deviceID : nil, name: identity ? deviceName : nil,
-                   via: identity ? picker.active.map { String($0.split(separator: " ")[0]) } : nil, pin: pairing?.pin)
-    guard let data = try? seal.seal(p) else { return }
+                   // "iPhone" since iOS 16; the Mac looks up the host name itself.
+                   name: identity ? UIDevice.current.name : nil,
+                   via: identity ? picker.active.map { String($0.split(separator: " ")[0]) } : nil)
+    guard var data = try? seal.seal(p) else { return }
+    if let claim = pairing?.claim { data = Seal.claim(claim, data) }
     // Ready flows only. A flow that is still resolving or waiting for a route
     // queues every send, and cancelling it with a few thousand queued crashes
     // inside Network.framework (it frees the queue recursively).
@@ -373,11 +376,28 @@ enum PairingStore {
     return try? JSONDecoder().decode(Pairing.self, from: data)
   }
 
+  /// This phone's key pair for pairing, made once and kept when the pairing
+  /// is forgotten: the Mac knows the phone by its public half, so pairing
+  /// again replaces the phone's row instead of adding one.
+  static var identity: Seal.PairingKey {
+    let file = URL.applicationSupportDirectory.appending(path: "identity.key")
+    if let d = try? Data(contentsOf: file), let k = try? Seal.PairingKey(rawRepresentation: d) { return k }
+    let k = Seal.PairingKey()
+    write(k.rawRepresentation, to: file)
+    return k
+  }
+
   static func save(_ p: Pairing?) {
     guard let p, let data = try? JSONEncoder().encode(p) else {
       try? FileManager.default.removeItem(at: url)
       return
     }
+    write(data, to: url)
+  }
+
+  /// Protected until first unlock and kept out of backups: a restore to
+  /// another phone must not carry the keys.
+  private static func write(_ data: Data, to url: URL) {
     try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     var u = url
     try? data.write(to: u, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])

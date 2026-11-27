@@ -2,7 +2,7 @@ import CoreImage.CIFilterBuiltins
 import Foundation
 import Security
 
-/// Secrets (pairing key, PIN) live in the login Keychain.
+/// The phones' keys live in the login Keychain.
 enum KeyStore {
   private static func query(_ account: String) -> [String: Any] {
     [kSecClass as String: kSecClassGenericPassword,
@@ -13,8 +13,8 @@ enum KeyStore {
   enum LoadError: Error { case keychain(OSStatus) }
 
   /// nil when there is no such item; throws when the Keychain refused, so a
-  /// locked or denied Keychain never silently becomes a new pairing key.
-  static func load(_ account: String = "pairing-key") throws -> Data? {
+  /// locked or denied Keychain never silently becomes an empty list saved over the real one.
+  static func load(_ account: String) throws -> Data? {
     var q = query(account)
     q[kSecReturnData as String] = true
     var out: CFTypeRef?
@@ -28,7 +28,7 @@ enum KeyStore {
     SecItemDelete(query(account) as CFDictionary)
   }
 
-  static func save(_ data: Data, _ account: String = "pairing-key") {
+  static func save(_ data: Data, _ account: String) {
     SecItemDelete(query(account) as CFDictionary)
     var q = query(account)
     q[kSecValueData as String] = data

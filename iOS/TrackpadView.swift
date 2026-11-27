@@ -6,18 +6,27 @@ import UIKit
 /// `TouchInterpreter`.
 struct TrackpadSurface: UIViewRepresentable {
   let client: Client
+  var drawing = false
 
   func makeUIView(context: Context) -> TouchPadView {
     let v = TouchPadView()
     v.client = client
+    v.drawing = drawing
     return v
   }
 
-  func updateUIView(_ v: TouchPadView, context: Context) { v.client = client }
+  func updateUIView(_ v: TouchPadView, context: Context) {
+    v.client = client
+    v.drawing = drawing
+  }
 }
 
 final class TouchPadView: UIView {
   weak var client: Client?
+  /// Drawing mode: the first finger is a pen, and its place in the view is
+  /// the cursor's place in the Mac's drawing area.
+  var drawing = false { didSet { if drawing != oldValue { pen = nil; client?.endStroke() } } }
+  private weak var pen: UITouch?
   private var down: Set<UITouch> = []
   private var link: CADisplayLink?
 
@@ -29,7 +38,16 @@ final class TouchPadView: UIView {
 
   required init?(coder: NSCoder) { fatalError() }
 
+  private func draw(_ t: UITouch) {
+    let p = t.location(in: self)
+    client?.draw(x: p.x / max(bounds.width, 1), y: p.y / max(bounds.height, 1))
+  }
+
   override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+    if drawing {
+      if pen == nil, let t = touches.first { pen = t; draw(t); startLink() }
+      return
+    }
     down.formUnion(touches)
     report(event)
     startLink()
@@ -37,6 +55,10 @@ final class TouchPadView: UIView {
 
   override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
     guard let client else { return }
+    if drawing {
+      if let pen, touches.contains(pen) { (event?.coalescedTouches(for: pen) ?? [pen]).forEach(draw) }
+      return
+    }
     if down.count == 1, let t = down.first {
       // Every sample the digitizer produced since the last frame, not just the latest.
       for s in event?.coalescedTouches(for: t) ?? [t] {
@@ -49,6 +71,10 @@ final class TouchPadView: UIView {
   }
 
   override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+    if drawing {
+      if let pen, touches.contains(pen) { self.pen = nil; client?.endStroke(); stopLink() }
+      return
+    }
     down.subtract(touches)
     report(event, lifted: touches)
     if down.isEmpty { stopLink() }

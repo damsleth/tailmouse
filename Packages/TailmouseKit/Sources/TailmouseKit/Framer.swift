@@ -55,14 +55,3 @@ public struct SendWindow: Sendable {
   public mutating func sent(now: Double) { unanswered += 1; lastSent = now }
   public mutating func answered() { unanswered = max(0, unanswered - 1) }
 }
-
-extension Wire {
-  /// The Bluetooth service a Mac advertises and its phones scan for, derived
-  /// from the pairing key. A phone finds only its own Mac, the advertisement
-  /// names nobody, and a new key moves the service.
-  public static func bleService(key: Data) -> UUID {
-    let h = Array(SHA256.hash(data: Data("tailmouse-ble-v1".utf8) + key))
-    return UUID(uuid: (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7],
-                       h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]))
-  }
-}

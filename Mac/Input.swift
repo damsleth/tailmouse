@@ -32,6 +32,9 @@ final class Input {
   private var lastClickAtPoint = CGPoint.zero
   private var clickState: Int64 = 1
 
+  /// The drawing area, in CG global coordinates; nil while there is none.
+  var tablet: CGRect?
+
   private var bounds = CGRect.null
   private var boundsAt: TimeInterval = -.infinity
 
@@ -41,6 +44,10 @@ final class Input {
     switch action {
     case .move(let dx, let dy): move(dx: dx, dy: dy)
     case .scroll(let dx, let dy, _): scroll(dx: dx, dy: dy, phase: 2)
+    case .place(let x, let y):
+      guard let r = tablet else { return }
+      // maxX is one past the last pixel.
+      post(move: CGPoint(x: r.minX + x * (r.width - 1), y: r.minY + y * (r.height - 1)))
     case .event(let e): handle(e)
     }
   }
@@ -87,11 +94,13 @@ final class Input {
   private func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
 
   private func move(dx: Double, dy: Double) {
-    let t = now()
-    let origin = (t - lastMove < Self.resyncAfter ? virtual : nil) ?? currentLocation()
-    let target = clamp(CGPoint(x: origin.x + dx, y: origin.y + dy))
+    let origin = currentLocation()
+    post(move: clamp(CGPoint(x: origin.x + dx, y: origin.y + dy)))
+  }
+
+  private func post(move target: CGPoint) {
     virtual = target
-    lastMove = t
+    lastMove = now()
     let e = CGEvent(mouseEventSource: source, mouseType: dragging ? .leftMouseDragged : .mouseMoved,
                     mouseCursorPosition: target, mouseButton: .left)
     // Editors and terminals ignore drag events whose click count is 0.
@@ -99,7 +108,11 @@ final class Input {
     e?.post(tap: .cghidEventTap)
   }
 
-  private func currentLocation() -> CGPoint { CGEvent(source: nil)?.location ?? .zero }
+  /// Just after a move the system may not have caught up, and a drawing
+  /// stroke presses the button in the same packet as the jump to its start.
+  private func currentLocation() -> CGPoint {
+    (now() - lastMove < Self.resyncAfter ? virtual : nil) ?? CGEvent(source: nil)?.location ?? .zero
+  }
 
   /// ponytail: clamps to the union of displays, so the cursor can sit in the
   /// dead corner of mismatched screens; clamp per display if that bites.

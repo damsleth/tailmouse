@@ -23,7 +23,7 @@ extension BLELink: Flow {
 }
 
 /// The Bluetooth route on the phone: finds the paired Mac by the service
-/// derived from the pairing key, reads the L2CAP PSM and opens a channel.
+/// named in the pairing, reads the L2CAP PSM and opens a channel.
 /// Everything on the main queue. Keeps looking until `stop`.
 final class BLECentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   /// The link when it is ready, nil when it is gone.
@@ -38,8 +38,8 @@ final class BLECentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   private var link: BLELink?
 
   /// The first call asks the user for Bluetooth access.
-  func start(key: Data) {
-    let wanted = CBUUID(nsuuid: Wire.bleService(key: key))
+  func start(service id: UUID) {
+    let wanted = CBUUID(nsuuid: id)
     guard wanted != service else { return }
     stop()
     service = wanted

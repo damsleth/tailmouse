@@ -6,6 +6,8 @@ public struct Sessions: Sendable {
   public enum Action: Equatable, Sendable {
     case move(dx: Double, dy: Double)
     case scroll(dx: Double, dy: Double, isNewGesture: Bool)
+    /// Drawing mode: put the cursor at this point of the drawing area (0…1).
+    case place(x: Double, y: Double)
     case event(Event)
   }
 
@@ -14,6 +16,10 @@ public struct Sessions: Sendable {
     var inbox = Inbox()
     var pointer = MotionTracker()
     var scroll = MotionTracker()
+    /// The last drawing position applied. The phone repeats its latest motion
+    /// in every packet, probes included; a total absorbs that, a position
+    /// would pull the cursor back once a second.
+    var placed: Motion?
     var lastSeen: TimeInterval
     /// Newest `Packet.time` seen. Motion from an older packet is dropped: a
     /// slow path (tailnet via DERP) would otherwise drag the cursor back.
@@ -27,20 +33,8 @@ public struct Sessions: Sendable {
   private var table: [UInt64: Session] = [:]
   public let name: String
 
-  /// The PIN a phone must send to start a session; nil means none, and an
-  /// empty string means required but not set yet, which lets no one in.
-  /// Changing it ends every session, so each phone has to present the new one.
-  public var pin: String? {
-    didSet { if pin != oldValue { table = [:]; wrongPins = [] } }
-  }
-  /// Distinct wrong PINs since the key or PIN last changed. Counting distinct
-  /// values bounds guessing; a phone repeating one stale PIN on every path
-  /// counts once. A right PIN does not clear it, so a key holder gets four
-  /// guesses in total, not four per reconnect of the real phone.
-  private var wrongPins: Set<String> = []
-  public static let maxWrongPins = 5
-  /// Too many guesses: refuse every PIN until the caller makes a new key.
-  public var pinLocked: Bool { wrongPins.count >= Self.maxWrongPins }
+  /// Width over height of the drawing area, told to the phone in every reply.
+  public var aspect: Double?
 
   public init(name: String) { self.name = name }
 
@@ -55,10 +49,6 @@ public struct Sessions: Sendable {
     guard var s = table[p.client] else {
       // First contact, or the Mac restarted. Nothing in this packet runs:
       // it was not sealed under a session we issued, so it may be a replay.
-      if let pin, pinLocked || pin.isEmpty || p.pin != pin {
-        if let tried = p.pin, !pinLocked, !pin.isEmpty { wrongPins.insert(tried) }
-        return (Reply(session: 0, ack: 0, echo: p.time, name: name, pin: p.pin == nil ? .required : .wrong), [])
-      }
       let s = Session(id: newID(), lastSeen: now, minDelay: now - p.time)
       table[p.client] = s
       return (reply(s, p), [])
@@ -86,6 +76,15 @@ public struct Sessions: Sendable {
         if let d = s.pointer.resolve(m) { actions.append(.move(dx: d.dx, dy: d.dy)) }
       case .scroll:
         if let d = s.scroll.resolve(m) { actions.append(.scroll(dx: d.dx, dy: d.dy, isNewGesture: d.isNewGesture)) }
+      case .tablet:
+        if m != s.placed, (0...1).contains(m.x), (0...1).contains(m.y) {
+          // A new stroke whose predecessor's `dragEnd` is still on its way
+          // (lost, or dropped by a latest-wins link): lift first, or the jump
+          // to the new start draws a line.
+          if let last = s.placed, last.gesture != m.gesture { actions.append(.event(.dragEnd)) }
+          s.placed = m
+          actions.append(.place(x: m.x, y: m.y))
+        }
       }
     }
     actions += s.inbox.accept(p.events)
@@ -105,6 +104,6 @@ public struct Sessions: Sendable {
   }
 
   private func reply(_ s: Session, _ p: Packet) -> Reply {
-    Reply(session: s.id, ack: s.inbox.delivered, echo: p.time, name: name)
+    Reply(session: s.id, ack: s.inbox.delivered, echo: p.time, name: name, aspect: aspect)
   }
 }

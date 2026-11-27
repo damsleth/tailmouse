@@ -3,8 +3,8 @@ import Foundation
 import os
 import TailmouseKit
 
-/// The Bluetooth route on the Mac: advertises a service derived from the
-/// pairing key and accepts L2CAP channels from phones. Runs on the server queue.
+/// The Bluetooth route on the Mac: advertises this Mac's service (it is in
+/// every pairing code) and accepts L2CAP channels from phones. Runs on the server queue.
 ///
 /// The same rules as the UDP flows: a channel whose first frame fails to open
 /// is closed, a channel that never authenticates goes after 3 s, and the
@@ -24,10 +24,10 @@ final class BLEPeripheral: NSObject, CBPeripheralManagerDelegate {
 
   init(queue: DispatchQueue) { self.queue = queue }
 
-  /// Advertise for this key, or stop with nil. The first call asks the user
+  /// Advertise this service, or stop with nil. The first call asks the user
   /// for Bluetooth access, so the manager is not made before it is needed.
-  func set(key: Data?) {
-    let wanted = key.map { CBUUID(nsuuid: Wire.bleService(key: $0)) }
+  func set(service id: UUID?) {
+    let wanted = id.map(CBUUID.init(nsuuid:))
     guard wanted != service else { return }
     teardown()
     service = wanted

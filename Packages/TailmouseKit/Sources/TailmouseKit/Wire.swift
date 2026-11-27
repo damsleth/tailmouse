@@ -7,7 +7,7 @@ import Foundation
 /// (`motion`, lossy, cumulative) plus every event the Mac has not acknowledged
 /// yet (`events`, reliable, ordered). The Mac answers each packet with a `Reply`.
 public enum Wire {
-  public static let version: UInt8 = 2
+  public static let version: UInt8 = 4
   public static let defaultPort: UInt16 = 47474
   public static let bonjourType = "_tailmouse._udp"
   /// The Mac drops a session (and releases held buttons) after this much silence.
@@ -32,27 +32,23 @@ public struct Packet: Equatable, Sendable {
   public var time: Double
   public var motion: Motion?
   public var events: [Sequenced]
-  // Identity rides on hellos and probes only; pointer packets leave it out.
-  /// Stable per install, unlike `client`; keys the Mac's device list.
-  public var device: UUID?
-  /// The phone's name as the user set it in the app.
+  // These ride on hellos and probes only; pointer packets leave them out.
+  // Which phone it is, the key that opens the packet says.
+  /// What the phone calls itself: "iPhone", since iOS 16. The Mac prefers the
+  /// host name it finds for the phone's address.
   public var name: String?
   /// The path the phone sends hot traffic on ("USB", "LAN", "AWDL", "Tailnet", "BLE").
   public var via: String?
-  /// Required to start a session when the Mac has a PIN set.
-  public var pin: String?
 
   public init(client: UInt64, session: UInt64, time: Double, motion: Motion? = nil, events: [Sequenced] = [],
-              device: UUID? = nil, name: String? = nil, via: String? = nil, pin: String? = nil) {
+              name: String? = nil, via: String? = nil) {
     self.client = client
     self.session = session
     self.time = time
     self.motion = motion
     self.events = events
-    self.device = device
     self.name = name
     self.via = via
-    self.pin = pin
   }
 }
 
@@ -64,24 +60,26 @@ public struct Reply: Equatable, Sendable {
   /// The `time` of the packet this answers.
   public var echo: Double
   public var name: String
-  /// Set when the Mac wants a PIN before it starts a session (`session` is 0).
-  public var pin: PinStatus?
+  /// Width over height of the Mac's drawing area, so the phone can shape its
+  /// surface to match and a circle stays a circle.
+  public var aspect: Double?
 
-  public enum PinStatus: UInt8, Sendable { case required = 1, wrong }
-
-  public init(session: UInt64, ack: UInt32, echo: Double, name: String, pin: PinStatus? = nil) {
+  public init(session: UInt64, ack: UInt32, echo: Double, name: String, aspect: Double? = nil) {
     self.session = session
     self.ack = ack
     self.echo = echo
     self.name = name
-    self.pin = pin
+    self.aspect = aspect
   }
 }
 
 /// Running total of the current gesture. The Mac applies `total - lastApplied`,
 /// so a lost, duplicated or late packet costs nothing.
+///
+/// `tablet` is the drawing mode: `x` and `y` are a position in the Mac's
+/// drawing area, 0…1 from its top-left corner, and `gesture` counts strokes.
 public struct Motion: Equatable, Sendable {
-  public enum Kind: Sendable { case pointer, scroll }
+  public enum Kind: Sendable { case pointer, scroll, tablet }
   public var kind: Kind
   /// Gesture counter; a new value starts the total from zero.
   public var gesture: UInt32
@@ -149,9 +147,9 @@ public enum Event: Equatable, Sendable {
 // 46 bytes before sealing; as JSON it was about 170.
 //
 // Packet: flags | client u64 | session u64 | time f64
-//         | [gesture u32, x f64, y f64] | [device 16 bytes] | [name] | [via] | [pin]
+//         | [gesture u32, x f64, y f64] | [name] | [via]
 //         | event count u8 | events: seq u32, time f64, tag u8, payload
-// Reply:  pin status u8 | session u64 | ack u32 | echo f64 | name
+// Reply:  session u64 | ack u32 | echo f64 | name | [aspect f64]
 //
 // A decoder ignores bytes after the last field it knows, so a new optional
 // field goes at the end: behind a new flag bit in `Packet`, bare in `Reply`.
@@ -163,24 +161,20 @@ public protocol WireCoded {
 }
 
 extension Packet: WireCoded {
-  private enum Flag { static let motion: UInt8 = 1, scroll: UInt8 = 2, device: UInt8 = 4, name: UInt8 = 8, via: UInt8 = 16, pin: UInt8 = 32 }
+  private enum Flag { static let motion: UInt8 = 1, scroll: UInt8 = 2, name: UInt8 = 8, via: UInt8 = 16, tablet: UInt8 = 64 }
   /// More unacked events than this wait for the next packet (`Outbox` holds fewer).
   static let maxEvents = 255
 
   public var wire: Data {
     var w = Data(capacity: 64)
     var flags: UInt8 = 0
-    if let motion { flags |= Flag.motion | (motion.kind == .scroll ? Flag.scroll : 0) }
-    if device != nil { flags |= Flag.device }
+    if let motion { flags |= Flag.motion | (motion.kind == .scroll ? Flag.scroll : 0) | (motion.kind == .tablet ? Flag.tablet : 0) }
     if name != nil { flags |= Flag.name }
     if via != nil { flags |= Flag.via }
-    if pin != nil { flags |= Flag.pin }
     w.put(flags); w.put(client); w.put(session); w.put(time)
     if let motion { w.put(motion.gesture); w.put(motion.x); w.put(motion.y) }
-    if let device { withUnsafeBytes(of: device.uuid) { w.append(contentsOf: $0) } }
     if let name { w.put(name) }
     if let via { w.put(via) }
-    if let pin { w.put(pin) }
     let events = events.prefix(Self.maxEvents)
     w.put(UInt8(events.count))
     for e in events {
@@ -205,15 +199,10 @@ extension Packet: WireCoded {
     self.init(client: client, session: session, time: time)
     if flags & Flag.motion != 0 {
       guard let g = r.u32(), let x = r.f64(), let y = r.f64() else { return nil }
-      motion = Motion(kind: flags & Flag.scroll != 0 ? .scroll : .pointer, gesture: g, x: x, y: y)
-    }
-    if flags & Flag.device != 0 {
-      guard let b = r.bytes(16) else { return nil }
-      device = b.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) }
+      motion = Motion(kind: flags & Flag.tablet != 0 ? .tablet : flags & Flag.scroll != 0 ? .scroll : .pointer, gesture: g, x: x, y: y)
     }
     if flags & Flag.name != 0 { guard let s = r.string() else { return nil }; name = s }
     if flags & Flag.via != 0 { guard let s = r.string() else { return nil }; via = s }
-    if flags & Flag.pin != 0 { guard let s = r.string() else { return nil }; pin = s }
     guard let count = r.u8() else { return nil }
     for _ in 0..<count {
       guard let seq = r.u32(), let t = r.f64(), let tag = r.u8() else { return nil }
@@ -241,15 +230,16 @@ extension Packet: WireCoded {
 extension Reply: WireCoded {
   public var wire: Data {
     var w = Data(capacity: 40)
-    w.put(pin?.rawValue ?? 0); w.put(session); w.put(ack); w.put(echo); w.put(name)
+    w.put(session); w.put(ack); w.put(echo); w.put(name)
+    if let aspect { w.put(aspect) }
     return w
   }
 
   public init?(wire: Data) {
     var r = Reader(wire)
-    guard let status = r.u8(), let session = r.u64(), let ack = r.u32(), let echo = r.f64(), let name = r.string(),
-          status == 0 || PinStatus(rawValue: status) != nil else { return nil }
-    self.init(session: session, ack: ack, echo: echo, name: name, pin: PinStatus(rawValue: status))
+    guard let session = r.u64(), let ack = r.u32(), let echo = r.f64(), let name = r.string() else { return nil }
+    self.init(session: session, ack: ack, echo: echo, name: name,
+              aspect: r.isEmpty ? nil : r.f64())
   }
 }
 
@@ -269,6 +259,7 @@ private extension Data {
 private struct Reader {
   private var data: Data
   init(_ data: Data) { self.data = data }
+  var isEmpty: Bool { data.isEmpty }
 
   mutating func bytes(_ n: Int) -> Data? {
     guard data.count >= n else { return nil }

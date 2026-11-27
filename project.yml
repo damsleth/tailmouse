@@ -46,10 +46,11 @@ targets:
       properties:
         CFBundleDisplayName: Tailmouse
         UILaunchScreen: {}
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         CADisableMinimumFrameDurationOnPhone: true
         NSBluetoothAlwaysUsageDescription: Tailmouse can reach your Mac over Bluetooth when Wi-Fi is unsteady.
         NSLocalNetworkUsageDescription: Tailmouse finds and talks to your Mac on the local network.
+        NSCameraUsageDescription: Tailmouse uses the camera to scan the pairing code on your Mac.
         NSBonjourServices: [_tailmouse._udp]
         CFBundleURLTypes:
           - CFBundleURLName: tailmouse

@@ -46,9 +46,11 @@ import Testing
 // MARK: - Pairing
 
 @Test func pairingURLRoundTrip() {
-  let p = Pairing(key: Seal.newKey().data, name: "Example Mac", hosts: ["100.64.0.1", "example-mac.tail0000.ts.net"])
+  let p = Pairing(key: Seal.newKey().data, ble: UUID(), name: "Example Mac", hosts: ["100.64.0.1", "example-mac.tail0000.ts.net"])
   #expect(Pairing(url: p.url) == p)
   #expect(Pairing(url: URL(string: "tailmouse://pair?k=short&n=x")!) == nil)
+  // Without the Bluetooth service: a link from an older Mac build.
+  #expect(Pairing(url: URL(string: p.url.absoluteString.replacingOccurrences(of: "b=", with: "x="))!) == nil)
 }
 
 // MARK: - Sessions over a bad link
@@ -179,11 +181,10 @@ struct SplitMix: RandomNumberGenerator {
   let p = Packet(client: .max, session: 7, time: 12.5,
                  motion: Motion(kind: .scroll, gesture: 9, x: -1.25, y: 3e6),
                  events: events.enumerated().map { Sequenced(seq: UInt32($0.offset), time: 1.5, event: $0.element) },
-                 device: UUID(), name: "Example iPhone", via: "BLE", pin: "0000")
+                 name: "Example iPhone", via: "BLE")
   #expect(Packet(wire: p.wire) == p)
-  let r = Reply(session: 7, ack: 3, echo: 12.5, name: "Example Mac", pin: .wrong)
+  let r = Reply(session: 7, ack: 3, echo: 12.5, name: "Example Mac")
   #expect(Reply(wire: r.wire) == r)
-  #expect(Reply(wire: Reply(session: 0, ack: 0, echo: 0, name: "").wire)?.pin == nil)
 }
 
 @Test func pointerPacketIsSmallAndTrailingBytesAreIgnored() {
@@ -191,6 +192,28 @@ struct SplitMix: RandomNumberGenerator {
   #expect(p.wire.count == 46)
   // A newer build appends fields; this one reads what it knows.
   #expect(Packet(wire: p.wire + Data([1, 2, 3])) == p)
+}
+
+@Test func drawingPositionAppliesOnceAndOnlyInsideTheArea() {
+  var mac = Sessions(name: "mac")
+  mac.aspect = 1.6
+  let (hello, _) = mac.receive(Packet(client: 1, session: 0, time: 0), now: 0)
+  #expect(hello.aspect == 1.6)
+  func send(_ t: Double, _ m: Motion) -> [Sessions.Action] {
+    mac.receive(Packet(client: 1, session: hello.session, time: t, motion: m), now: t).1
+  }
+  let at = Motion(kind: .tablet, gesture: 1, x: 0.25, y: 0.75)
+  #expect(send(1, at) == [.place(x: 0.25, y: 0.75)])
+  #expect(send(2, at) == [])                                     // the probe repeats it: no pull-back
+  // A new stroke at the same spot still applies, and lifts first: the old
+  // stroke's dragEnd may not have arrived, and the jump must not draw.
+  #expect(send(3, Motion(kind: .tablet, gesture: 2, x: 0.25, y: 0.75)) == [.event(.dragEnd), .place(x: 0.25, y: 0.75)])
+  #expect(send(4, Motion(kind: .tablet, gesture: 3, x: 1.5, y: 0.5)) == [])
+  #expect(Packet(wire: Packet(client: 1, session: 2, time: 3, motion: at).wire)?.motion == at)
+  // A reply from a Mac without a drawing area ends after the name.
+  let plain = Reply(session: 1, ack: 2, echo: 3, name: "Example Mac")
+  #expect(Reply(wire: plain.wire) == plain)
+  #expect(Reply(wire: Reply(session: 1, ack: 2, echo: 3, name: "Example Mac", aspect: 1.6).wire)?.aspect == 1.6)
 }
 
 @Test func malformedWireIsRefused() {
@@ -204,39 +227,87 @@ struct SplitMix: RandomNumberGenerator {
   var tag = Packet(client: 1, session: 2, time: 3, events: [Sequenced(seq: 1, time: 0, event: .dragBegin)]).wire
   tag[tag.count - 1] = 200                                               // an event this build doesn't know
   #expect(Packet(wire: tag) == nil)
-  #expect(Reply(wire: Data([9]) + Reply(session: 0, ack: 0, echo: 0, name: "").wire.dropFirst()) == nil)
 }
 
-@Test func wrongPinStartsNoSessionAndRunsNothing() {
-  var mac = Sessions(name: "mac")
-  mac.pin = "1234"
-  let click = [Sequenced(seq: 1, time: 0, event: .click(.left))]
-  let none = mac.receive(Packet(client: 1, session: 0, time: 0, events: click), now: 0)
-  #expect(none.0.pin == .required && none.0.session == 0 && none.1.isEmpty)
-  let wrong = mac.receive(Packet(client: 1, session: 0, time: 0, events: click, pin: "0000"), now: 0)
-  #expect(wrong.0.pin == .wrong && wrong.0.session == 0 && wrong.1.isEmpty)
-  #expect(mac.activeClients == 0)
-  let right = mac.receive(Packet(client: 1, session: 0, time: 0, pin: "1234"), now: 0)
-  #expect(right.0.pin == nil && right.0.session != 0)
+@Test func eachPhoneHasItsOwnKeyAndRemovingItRevokesIt() throws {
+  let a = Seal(key: Seal.newKey()), b = Seal(key: Seal.newKey())
+  var mac = Keyring(name: "mac", keys: ["a": a.key.data, "b": b.key.data])
+  // #expect can't call a mutating method.
+  func rx(_ d: Data, now: Double) -> Keyring.Received? { mac.receive(d, now: now) }
+  let hello = Packet(client: 1, session: 0, time: 0)
+  let fromA = try #require(rx(try a.seal(hello), now: 0))
+  let fromB = try #require(rx(try b.seal(hello), now: 0))
+  #expect(fromA.id == "a" && fromB.id == "b")
+  // Each answer opens only with the asker's key.
+  #expect(a.open(Reply.self, from: try #require(fromA.datagram)) == fromA.reply)
+  #expect(b.open(Reply.self, from: try #require(fromA.datagram)) == nil)
+  // The same client id under another key is another session: b can't learn a's.
+  #expect(fromA.reply.session != fromB.reply.session)
+  mac.remove("a")
+  #expect(rx(try a.seal(hello), now: 1) == nil)
+  #expect(rx(try b.seal(hello), now: 1)?.id == "b")
+  #expect(rx(try Seal(key: Seal.newKey()).seal(hello), now: 1) == nil)   // a stranger
 }
 
-@Test func fiveDistinctWrongPinsLockEvenTheRightOne() {
-  var mac = Sessions(name: "mac")
-  mac.pin = "1234"
-  // One stale PIN repeated (every path, every probe) counts once.
-  for _ in 0..<20 { _ = mac.receive(Packet(client: 1, session: 0, time: 0, pin: "0000"), now: 0) }
-  #expect(!mac.pinLocked)
-  for g in ["0001", "0002", "0003", "0004"] { _ = mac.receive(Packet(client: 1, session: 0, time: 0, pin: g), now: 0) }
-  #expect(mac.pinLocked)
-  let right = mac.receive(Packet(client: 2, session: 0, time: 0, pin: "1234"), now: 0)
-  #expect(right.0.session == 0)
+@Test func pairingCodeMakesOnePhoneWithAKeyTheCodeDoesNotGive() throws {
+  var mac = Keyring(name: "mac")
+  func rx(_ d: Data, now: Double) -> Keyring.Received? { mac.receive(d, now: now) }
+  let offer = Seal.PairingKey()
+  let code = Pairing(key: offer.publicKey.rawRepresentation, ble: UUID(), name: "Example Mac", hosts: [])
+  func hello(_ p: Pairing, claim: Bool = true) throws -> Data {
+    let d = try #require(Seal(keyData: p.key)).seal(Packet(client: 1, session: 0, time: 0))
+    return claim ? Seal.claim(try #require(p.claim), d) : d
+  }
+  let phone = try #require(code.claimed())
+  #expect(rx(try hello(phone), now: 0) == nil)                       // no code on screen
+  mac.offer((id: "first", key: offer))
+  // The code itself is not a key: what is on screen opens nothing.
+  #expect(rx(try hello(code, claim: false), now: 0) == nil)
+  let first = try #require(rx(try hello(phone), now: 0))
+  #expect(first.id == "first" && first.paired == phone.key + (phone.claim ?? Data()))
+  // A second scan of the same code gets another key, and the Mac has no use for it.
+  let copy = try #require(code.claimed())
+  #expect(copy.key != phone.key)
+  #expect(rx(try hello(copy), now: 1) == nil)
+  // Even with a new code on screen: that one has another private key.
+  mac.offer((id: "second", key: Seal.PairingKey()))
+  #expect(rx(try hello(copy), now: 1) == nil)
+  // The phone may claim again (its answer was lost), and then stops claiming.
+  let again = try #require(rx(try hello(phone), now: 1))
+  #expect(again.id == "first" && again.paired == nil && mac.ids == ["first"])
+  #expect(rx(try hello(phone, claim: false), now: 1)?.id == "first")
+  // The window closes with its code unused.
+  mac.offer(nil)
+  let ended = mac.expire(now: 100)
+  #expect(ended)
 }
 
-@Test func changingPinEndsSessions() {
-  var mac = Sessions(name: "mac")
-  _ = mac.receive(Packet(client: 1, session: 0, time: 0), now: 0)
-  mac.pin = "1234"
-  #expect(mac.activeClients == 0)
+@Test func samePhonePairingAgainKeepsItsRowAndLosesItsOldKey() throws {
+  var mac = Keyring(name: "mac")
+  func rx(_ d: Data, now: Double) -> Keyring.Received? { mac.receive(d, now: now) }
+  func hello(_ p: Pairing, claim: Bool = true) throws -> Data {
+    let d = try #require(Seal(keyData: p.key)).seal(Packet(client: 1, session: 0, time: 0))
+    return claim ? Seal.claim(try #require(p.claim), d) : d
+  }
+  func code(_ id: String) -> Pairing {
+    let offer = Seal.PairingKey()
+    mac.offer((id: id, key: offer))
+    return Pairing(key: offer.publicKey.rawRepresentation, ble: UUID(), name: "Example Mac", hosts: [])
+  }
+  let phone = Seal.PairingKey(), other = Seal.PairingKey()
+  let first = try #require(code("a").claimed(with: phone))
+  let stored = try #require(rx(try hello(first), now: 0)?.paired)
+  // The Mac restarts with what it stored, and the phone scans a new code.
+  mac = Keyring(name: "mac", keys: ["a": stored])
+  let second = try #require(code("b").claimed(with: phone))
+  let again = try #require(rx(try hello(second), now: 1))
+  #expect(again.id == "a" && again.paired != nil && mac.ids == ["a"])
+  #expect(second.key != first.key)
+  #expect(rx(try hello(first, claim: false), now: 2) == nil)      // the old key is dead
+  #expect(rx(try hello(second, claim: false), now: 2)?.id == "a")
+  // Another phone is another row.
+  #expect(rx(try hello(try #require(code("c").claimed(with: other))), now: 3)?.id == "c")
+  #expect(mac.ids == ["a", "c"])
 }
 
 @Test func routesClassifyByAddress() {
@@ -279,24 +350,6 @@ struct SplitMix: RandomNumberGenerator {
   #expect(actions == [.event(.click(.left))])
 }
 
-@Test func pinRequiredButUnsetLetsNoOneIn() {
-  var mac = Sessions(name: "mac")
-  mac.pin = ""
-  let a = mac.receive(Packet(client: 1, session: 0, time: 0), now: 0).0.session
-  let b = mac.receive(Packet(client: 1, session: 0, time: 0, pin: ""), now: 0).0.session
-  #expect(a == 0 && b == 0)
-}
-
-@Test func rightPinDoesNotResetGuessCount() {
-  var mac = Sessions(name: "mac")
-  mac.pin = "1234"
-  for round in 0..<5 {
-    _ = mac.receive(Packet(client: UInt64(100 + round), session: 0, time: 0, pin: "1234"), now: 0)
-    _ = mac.receive(Packet(client: 1, session: 0, time: 0, pin: String(format: "%04d", round)), now: 0)
-  }
-  #expect(mac.pinLocked)
-}
-
 @Test func absurdMotionIsDropped() {
   var mac = Sessions(name: "mac")
   let id = mac.receive(Packet(client: 1, session: 0, time: 0), now: 0).0.session
@@ -308,7 +361,7 @@ struct SplitMix: RandomNumberGenerator {
 }
 
 @Test func pairingLinkKeepsOnlyTailnetHosts() {
-  let p = Pairing(key: Seal.newKey().data, name: "Example Mac", hosts: ["100.64.0.1", "evil.example", "8.8.8.8", "fd7a:115c:a1e0::1", "x.tail0000.ts.net"])
+  let p = Pairing(key: Seal.newKey().data, ble: UUID(), name: "Example Mac", hosts: ["100.64.0.1", "evil.example", "8.8.8.8", "fd7a:115c:a1e0::1", "x.tail0000.ts.net"])
   #expect(Pairing(url: p.url)?.hosts == ["100.64.0.1", "fd7a:115c:a1e0::1", "x.tail0000.ts.net"])
 }
 
@@ -345,10 +398,4 @@ struct SplitMix: RandomNumberGenerator {
   w.answered(); w.answered(); w.answered()             // extra answers don't widen it
   w.sent(now: 1); w.sent(now: 1)
   #expect(w.wait(now: 1.01) > 0)
-}
-
-@Test func bleServiceFollowsTheKey() {
-  let a = Data(repeating: 1, count: 32), b = Data(repeating: 2, count: 32)
-  #expect(Wire.bleService(key: a) == Wire.bleService(key: a))
-  #expect(Wire.bleService(key: a) != Wire.bleService(key: b))
 }
